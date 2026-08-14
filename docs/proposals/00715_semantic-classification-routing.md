@@ -1,6 +1,6 @@
 ---
 issue: https://github.com/praxis-proxy/ai/issues/715
-discussion: https://github.com/praxis-proxy/ai/issues/715
+discussion: https://github.com/praxis-proxy/ai/pull/750
 status: proposed
 authors:
   - jordigilh
