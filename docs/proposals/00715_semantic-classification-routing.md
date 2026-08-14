@@ -112,7 +112,12 @@ routing).
 - A hybrid embedding + LLM-escalation or fine-tuned classifier for
   low-confidence matches. `ai#74`'s acceptance criteria mention this; it's
   a candidate v2 follow-up pending resolution of the accuracy question in
-  Open Questions below, not settled v1 scope.
+  Open Questions below, not settled v1 scope. v1's embedding/cosine-
+  similarity path has no instruction-following LLM call, so it isn't
+  exposed to prompt injection targeting an evaluator's own judgment; if the
+  LLM-escalation path above is ever built, it would need the same
+  untrusted-content isolation framing tracked in
+  [ai#754](https://github.com/praxis-proxy/ai/issues/754).
 - Response-side classification (classifying model *output*, not the
   request). Request-side only, matching how `intelligent_route` already
   operates.
