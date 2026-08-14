@@ -5,8 +5,6 @@ status: proposed
 authors:
   - jordigilh
 graduation_criteria:
-  - Embedding-backend decision (external API vs. local model vs. hybrid)
-    confirmed by @cnuland on ai#715
   - Compliance-tier gating approach reviewed and agreed by a security
     stakeholder
   - Classifier deployment shape (in-process vs. sidecar) confirmed, with
@@ -25,13 +23,17 @@ stakeholders:
 
 Add a new `semantic_classify` filter that classifies an inference request's
 **task type** (e.g. code, math, creative, general) and **complexity**
-(easy/hard) from the prompt content itself — via embedding similarity
-against operator-defined seed-utterance routes — and promotes each as an
+(easy/hard) from the prompt content itself, and promotes each as an
 independent fact (not fused into a single combined capability) into the
 same capability-kind seam `intelligent_route` already uses for
 model-header and MCP-tool-based routing. No new routing mechanism is
 introduced; this is a new *signal producer* feeding the existing
-classify → route → branch pipeline.
+classify → route → branch pipeline. The classification *technique* is the
+backend's concern, not this filter's: v1's default backend uses embedding
+similarity against operator-defined seed-utterance routes, but the
+contract this filter consumes — task/complexity facts in — is
+technique-agnostic, so a future backend using a different method needs no
+interface change.
 
 This closes MVP 3 ("semantic routing"), the one Praxis MVP with zero
 existing code today, of the 3 the customer named (alongside
@@ -50,8 +52,11 @@ routing).
   fused into combinations like `code-hard` or `math-easy`. This keeps
   future classification dimensions addable without a combinatorial
   explosion of capability kinds.
-- A pluggable classification backend (embedding model / provider), so the
-  embedding-backend decision below doesn't get hard-coded into filter logic.
+- A pluggable, technique-agnostic classification backend: this filter
+  consumes task/complexity facts regardless of whether the backend behind
+  them uses embedding similarity, a fine-tuned encoder, or another
+  classification method entirely. Which technique to use is the backend's
+  decision, not an architectural commitment this filter's interface makes.
 - Seed-utterance route definitions, configured per deployment (operators
   define their own routes/utterances; no fixed taxonomy baked into the
   filter).
@@ -75,9 +80,20 @@ routing).
   than guessing. It never fails open to an alternate classification path,
   since that would reopen the exact compliance side-channel this proposal
   exists to close.
-- Turn-level embedding only (the current user turn, not full conversation
-  history) — avoids semantic dilution as multi-turn conversations grow, and
-  bounds what content the classifier ever processes per request.
+- The signal contract with the classifier is not restricted to
+  current-turn-only content — it may carry conversational context if the
+  classifier needs it to answer confidently, since deciding how much
+  context is enough is the classifier's concern, not Praxis's (the same
+  ownership split that puts caching, session state, and abstention on the
+  classifier's side, not this filter's). Praxis's v1 implementation
+  defaults to sending only the current turn — an implementation choice
+  that bounds v1's cost and avoids requiring new session-state
+  infrastructure on Praxis's side, not a hard-coded interface limit; a
+  later backend needing more context is free to ask for it without an
+  interface change. What v1's default does guarantee regardless: a
+  classification decision is never cached or reused across turns — every
+  request gets a fresh classification call, so no decision outlives the
+  turn it was made for, even if a later turn contradicts it.
 - A compliance-tier gate that runs *before* any embedding/classification
   call, so requests whose tier forbids it never reach the classifier at all
   (`skipped_by_policy`, fail-closed not fail-open). **The tier itself must
@@ -97,18 +113,20 @@ routing).
 - Jailbreak / prompt-injection / general content-safety detection — that's
   `ai_guardrails`'s domain. This filter only classifies task type and
   complexity for routing purposes, not safety.
-- Multi-turn / context-level classification, for either routing or safety.
-  For safety (`ai_guardrails`'s domain per the bullet above), a bounded,
-  live, context-spanning check is only reachable as a fixed-window
+- Multi-turn / context-level *detection* for safety. This remains
+  `ai_guardrails`'s domain per the bullet above: a bounded, live,
+  context-spanning safety check is only reachable as a fixed-window
   approximation with known evasion risk, or as a new session-state filter
-  architecture — neither is mature enough to be a first deliverable, and a
-  bypassable patch is worse than an honestly-scoped turn-level check. For
-  routing specifically, the problem is sharper than coverage: a route
-  decision derived from accumulated context can be invalidated the instant
-  a later turn pivots direction, and no window size or confidence threshold
-  fixes that, because it's a staleness problem, not a coverage gap.
-  Turn-level-only sidesteps this by never making a routing claim that
-  outlives the turn it's based on.
+  architecture — neither is mature enough to be a first deliverable there,
+  and a bypassable patch is worse than an honestly-scoped turn-level check.
+  This is distinct from the routing classifier's context handling
+  (Goals above): the routing signal contract isn't restricted to
+  current-turn-only, but v1's default implementation is, for cost and
+  decision-staleness reasons rather than an architectural ban — a route
+  decision that gets cached or reused past the turn it was computed for
+  can be invalidated by a later turn's pivot, which is why v1 never does
+  that, independent of how much input context a given classification call
+  used.
 - A hybrid embedding + LLM-escalation or fine-tuned classifier for
   low-confidence matches. `ai#74`'s acceptance criteria mention this; it's
   a candidate v2 follow-up pending resolution of the accuracy question in
@@ -137,9 +155,15 @@ because bundling it inside a larger epic left it with no independent
 estimate and two unresolved decisions blocking any estimate from firming
 up:
 
-1. **No embedding backend chosen.** External API (new latency + credential
-   surface on every routing decision) vs. local model (new runtime
-   dependency Praxis doesn't have today) vs. a hybrid of the two.
+1. **~~No embedding backend chosen~~ — resolved, not blocking.** Originally
+   framed as a choice between external API, local model, and hybrid.
+   `@cnuland` reframed this on `ai#750`: embedding similarity is one
+   classifier technique among several, not an architectural commitment
+   Praxis should block on — Praxis consumes a technique-agnostic
+   classification signal, and which technique produces it is the
+   classifier's decision. The still-open question this reframing doesn't
+   resolve is classifier *deployment shape* (in-process vs. sidecar vs.
+   remote), covered in Open Questions below.
 2. **An unresolved compliance/security question**, not just a timeline
    risk. Prior research (`@cnuland`, Jul 31) found that routing on shared
    context across models with different compliance postures — e.g. a local
@@ -157,12 +181,14 @@ implementation for Envoy AI Gateway's semantic routing). Its architecture
 treats safety/compliance signals as first-class and parallel to routing
 classification specifically to avoid the same side-channel risk, and its
 multi-turn handling is turn-scoped by default. A revised recommendation
-grounded in this precedent (defaulting to local classification for the
-routing decision rather than an external API) has been posted on
+grounded in this precedent — defaulting to local classification for the
+routing decision rather than an external API — was posted on
 [ai#715](https://github.com/praxis-proxy/ai/issues/715#issuecomment-5293888816)
-and is awaiting `@cnuland`'s confirmation — the `How?` section of this
-proposal will follow once the open questions below are resolved, per this
-repo's proposal convention.
+and confirmed by `@cnuland` on `ai#750` ("I'd frame the initial
+architecture as local classification inside the trusted inference
+boundary rather than routing every prompt to an external embedding
+provider"). The `How?` section of this proposal will follow once the open
+questions below are resolved, per this repo's proposal convention.
 
 ### Open Questions
 
@@ -194,6 +220,27 @@ block writing `How?`:
    clear the bar for a demo-quality v1, or does fine-tuning need to move
    from the "candidate v2" Non-Goal above into v1 scope? Unresolved as of
    this writing.
+3. **Sidecar call must use `SubRequestConnector`/`SubRequestClient`, not a
+   bare HTTP client.** Code inspection while drafting this proposal found
+   that `ai_guardrails`' external-provider call ([#755](https://github.com/praxis-proxy/ai/issues/755))
+   bypasses Praxis's own sub-request executor (`praxis-core`'s
+   `SubRequestConnector`/`SubRequestClient`), so it has no admission cap,
+   no circuit breaker, and no unified deadline — a degraded provider costs
+   every concurrent request the full configured timeout instead of
+   fast-failing. The classifier sidecar call proposed in Open Question 1
+   above should not repeat this: it must be wired through
+   `SubRequestConnector`/`SubRequestClient` from the start so a degraded
+   or overloaded sidecar fails fast and sheds load rather than amplifying
+   latency as request volume grows. Latency-budget note: for the v1
+   default (local embedding model, current-turn-only, no cross-turn
+   caching per the Goals above), published benchmarks for the underlying
+   model put single-sentence CPU inference around 10–30ms — small next to
+   typical LLM-based guardrail-provider latencies (several hundred ms to
+   ~1s per published NeMo Guardrails benchmarks), so no separate
+   parallel-execution optimization against `ai_guardrails` is proposed for
+   v1. This should be revisited only if a future classification backend
+   (the technique-agnostic contract permits e.g. an LLM-based classifier)
+   brings classify latency into the same order of magnitude as guardrails.
 
 ### User Stories
 
@@ -205,12 +252,13 @@ block writing `How?`:
   simple queries route to smaller/cheaper models and complex reasoning
   routes to frontier models, without per-request client logic.
 - As a security/compliance stakeholder, I want a guarantee that
-  compliance-tagged traffic never reaches an embedding backend that isn't
-  cleared for it, that the compliance tier itself can never be forced by a
-  client, and that classification never processes more conversation
-  context than the current turn.
-- As a developer, I want to add a new embedding backend by implementing one
-  interface, not by modifying the filter's core logic.
+  compliance-tagged traffic never reaches a classification backend that
+  isn't cleared for it, that the compliance tier itself can never be
+  forced by a client, and that a classification decision is never cached
+  or reused past the turn it was computed for.
+- As a developer, I want to add a new classification backend — regardless
+  of technique — by implementing one interface, not by modifying the
+  filter's core logic.
 - As an operator, I want requests that don't confidently match any
   configured route to pass through unclassified rather than be misrouted on
   a low-confidence guess.
