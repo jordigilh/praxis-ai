@@ -97,6 +97,18 @@ routing).
 - Jailbreak / prompt-injection / general content-safety detection — that's
   `ai_guardrails`'s domain. This filter only classifies task type and
   complexity for routing purposes, not safety.
+- Multi-turn / context-level classification, for either routing or safety.
+  For safety (`ai_guardrails`'s domain per the bullet above), a bounded,
+  live, context-spanning check is only reachable as a fixed-window
+  approximation with known evasion risk, or as a new session-state filter
+  architecture — neither is mature enough to be a first deliverable, and a
+  bypassable patch is worse than an honestly-scoped turn-level check. For
+  routing specifically, the problem is sharper than coverage: a route
+  decision derived from accumulated context can be invalidated the instant
+  a later turn pivots direction, and no window size or confidence threshold
+  fixes that, because it's a staleness problem, not a coverage gap.
+  Turn-level-only sidesteps this by never making a routing claim that
+  outlives the turn it's based on.
 - A hybrid embedding + LLM-escalation or fine-tuned classifier for
   low-confidence matches. `ai#74`'s acceptance criteria mention this; it's
   a candidate v2 follow-up pending resolution of the accuracy question in
