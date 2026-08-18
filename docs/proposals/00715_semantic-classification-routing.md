@@ -21,7 +21,7 @@ stakeholders:
 
 ## What?
 
-Add a new `semantic_classify` filter that classifies an inference request's
+Add a new `semantic_classifier` filter that classifies an inference request's
 **task type** (e.g. code, math, creative, general) and **complexity**
 (easy/hard) from the prompt content itself, and promotes each as an
 independent fact (not fused into a single combined capability) into the
@@ -35,14 +35,9 @@ contract this filter consumes — task/complexity facts in — is
 technique-agnostic, so a future backend using a different method needs no
 interface change.
 
-This closes MVP 3 ("semantic routing"), the one Praxis MVP with zero
-existing code today, of the 3 the customer named (alongside
-model-based/app-based multi-cluster routing and intelligent/Grid-aware
-routing).
-
 ### Goals
 
-- A `semantic_classify` HTTP filter, following the existing filter-model
+- A `semantic_classifier` HTTP filter, following the existing filter-model
   conventions (`anthropic_messages_format`, `ai_guardrails`): stateless,
   configured per-pipeline, promotes facts to headers/metadata for downstream
   filters to consume — introduces no new routing primitive.
@@ -72,28 +67,36 @@ routing).
   `intelligent_route` needs to tell these apart: "we confidently decided
   not to classify this prompt" is a materially different signal than "the
   classification system is broken," and only the latter should be treated
-  as a health/availability concern.
-- On `unavailable`, semantic routing **fails closed**: it routes on
-  existing structured signals (model header, `mcp.method`) only, the same
-  way Grid already fails closed elsewhere — e.g. `grid#7`'s GridSite
-  eligibility gate excludes a peer when no matching site is found, rather
-  than guessing. It never fails open to an alternate classification path,
-  since that would reopen the exact compliance side-channel this proposal
-  exists to close.
+  as a health/availability concern. Each state is promoted as its own
+  outcome fact, not just `classified` — so downstream filters can match
+  all four explicitly rather than infer the rest from missing headers.
+- On `unavailable`, this filter sets no task/complexity facts, but does
+  promote the outcome itself (e.g. `X-Classification-Outcome:
+  unavailable`) via the same header mechanism used above. This keeps the
+  signal local and explicit, matching two production precedents for an
+  external decision-maker going unavailable: Envoy `ext_proc`'s
+  [`failure_mode_allow` toggle](https://github.com/envoyproxy/envoy/blob/main/api/envoy/extensions/filters/http/ext_proc/v3/ext_proc.proto)
+  and [vLLM Semantic Router](https://github.com/vllm-project/semantic-router)'s
+  own
+  ["fail-safe design"](https://github.com/vllm-project/semantic-router/blob/29aba60e/website/docs/proposals/production-stack-integration.md)
+  (itself built on `ext_proc`). An operator can then match
+  `intelligent_route` candidates on this header via existing
+  `conditions.headers` (same mechanism as `ai_guardrails` in Non-Goals)
+  for explicit graceful degradation — not a new config knob, just the
+  existing fact-promotion pattern extended to the outcome. It never fails
+  open to an alternate classification path, since that would reopen the
+  compliance side-channel this proposal exists to close; whether
+  `unavailable` degrades gracefully or hard-fails is still
+  `intelligent_route`'s route-table decision (fallback candidate or not),
+  the same pattern `router` uses for catch-all routes — now explicitly
+  reachable instead of only implicit.
 - The signal contract with the classifier is not restricted to
-  current-turn-only content — it may carry conversational context if the
-  classifier needs it to answer confidently, since deciding how much
-  context is enough is the classifier's concern, not Praxis's (the same
-  ownership split that puts caching, session state, and abstention on the
-  classifier's side, not this filter's). Praxis's v1 implementation
-  defaults to sending only the current turn — an implementation choice
-  that bounds v1's cost and avoids requiring new session-state
-  infrastructure on Praxis's side, not a hard-coded interface limit; a
-  later backend needing more context is free to ask for it without an
-  interface change. What v1's default does guarantee regardless: a
-  classification decision is never cached or reused across turns — every
-  request gets a fresh classification call, so no decision outlives the
-  turn it was made for, even if a later turn contradicts it.
+  current-turn-only content — deciding how much context is enough is the
+  classifier's concern, not Praxis's. Praxis's v1 implementation defaults
+  to sending only the current turn, an implementation choice bounding v1's
+  cost, not a hard-coded interface limit. Regardless of how much context a
+  backend uses, v1 guarantees a classification decision is never cached or
+  reused across turns.
 - A compliance-tier gate that runs *before* any embedding/classification
   call, so requests whose tier forbids it never reach the classifier at all
   (`skipped_by_policy`, fail-closed not fail-open). **The tier itself must
@@ -111,68 +114,55 @@ routing).
 
 - Semantic caching (a related but separate feature; not in scope here).
 - Jailbreak / prompt-injection / general content-safety detection — that's
-  `ai_guardrails`'s domain. This filter only classifies task type and
-  complexity for routing purposes, not safety.
-- Multi-turn / context-level *detection* for safety. This remains
-  `ai_guardrails`'s domain per the bullet above: a bounded, live,
-  context-spanning safety check is only reachable as a fixed-window
-  approximation with known evasion risk, or as a new session-state filter
-  architecture — neither is mature enough to be a first deliverable there,
-  and a bypassable patch is worse than an honestly-scoped turn-level check.
-  This is distinct from the routing classifier's context handling
-  (Goals above): the routing signal contract isn't restricted to
-  current-turn-only, but v1's default implementation is, for cost and
-  decision-staleness reasons rather than an architectural ban — a route
-  decision that gets cached or reused past the turn it was computed for
-  can be invalidated by a later turn's pivot, which is why v1 never does
-  that, independent of how much input context a given classification call
-  used.
+  `ai_guardrails`'s domain, not this filter's. That said, nothing prevents
+  `ai_guardrails` (or any other downstream filter) from scoping its own
+  policy to this filter's output today: task/complexity facts are promoted
+  as ordinary HTTP headers (`X-Task-Type`, `X-Complexity`), matchable via
+  existing filter `conditions.headers`, with no interface change on either
+  side.
+- Multi-turn / context-level *detection* for safety — still
+  `ai_guardrails`'s domain. A live, context-spanning safety check is only
+  reachable today as a fixed-window approximation with known evasion risk,
+  not mature enough to be a first deliverable. This is distinct from the
+  routing classifier's context handling above: the *signal contract* isn't
+  restricted to current-turn-only, only v1's default implementation is,
+  for cost and decision-staleness reasons.
 - A hybrid embedding + LLM-escalation or fine-tuned classifier for
-  low-confidence matches. `ai#74`'s acceptance criteria mention this; it's
-  a candidate v2 follow-up pending resolution of the accuracy question in
-  Open Questions below, not settled v1 scope. v1's embedding/cosine-
-  similarity path has no instruction-following LLM call, so it isn't
-  exposed to prompt injection targeting an evaluator's own judgment; if the
-  LLM-escalation path above is ever built, it would need the same
-  untrusted-content isolation framing tracked in
+  low-confidence matches. A candidate v2 follow-up pending the accuracy
+  question in Open Questions below, not settled v1 scope. If an
+  LLM-escalation path is ever built, it needs the same untrusted-content
+  isolation framing tracked in
   [ai#754](https://github.com/praxis-proxy/ai/issues/754).
-- Response-side classification (classifying model *output*, not the
-  request). Request-side only, matching how `intelligent_route` already
-  operates.
+- Response-side classification (classifying model *output* for routing
+  purposes) — out of scope; see Open Questions below for whether this is a
+  v1-scoping choice or an architectural boundary. (Response-*content*
+  inspection for safety/redaction is `ai_guardrails`'s domain, an unrelated
+  operation on an already-complete response.)
 
 ## Why?
 
 ### Motivation
 
-Semantic routing is one of the 3 MVPs the customer named, but today it has
-zero coverage anywhere in `praxis`, `praxis-ai`, or `praxis-grid` — confirmed
-by a code-search sweep across all three repos returning zero
-embedding/classification code; only structured-field matching (model
-header, `mcp.method`) exists. It was tracked only as a stretch-goal bullet
-inside the `ai#74` epic until being promoted to its own scoped issue,
-[ai#715](https://github.com/praxis-proxy/ai/issues/715), specifically
-because bundling it inside a larger epic left it with no independent
-estimate and two unresolved decisions blocking any estimate from firming
-up:
+Praxis has no content-aware routing signal today: `intelligent_route`
+matches only structured fields (model header, `mcp.method`), confirmed by a
+code-search sweep across `praxis`, `praxis-ai`, and `praxis-grid` returning
+zero embedding/classification code anywhere. Closing that gap surfaced two
+decisions that needed resolving before scoping this as its own filter:
 
-1. **~~No embedding backend chosen~~ — resolved, not blocking.** Originally
-   framed as a choice between external API, local model, and hybrid.
-   `@cnuland` reframed this on `ai#750`: embedding similarity is one
-   classifier technique among several, not an architectural commitment
-   Praxis should block on — Praxis consumes a technique-agnostic
-   classification signal, and which technique produces it is the
-   classifier's decision. The still-open question this reframing doesn't
+1. **~~No embedding backend chosen~~ — resolved, not blocking.** Embedding
+   similarity is one classifier technique among several, not an
+   architectural commitment Praxis should block on — Praxis consumes a
+   technique-agnostic classification signal, and which technique produces
+   it is the classifier's decision. The still-open question this doesn't
    resolve is classifier *deployment shape* (in-process vs. sidecar vs.
    remote), covered in Open Questions below.
-2. **An unresolved compliance/security question**, not just a timeline
-   risk. Prior research (`@cnuland`, Jul 31) found that routing on shared
-   context across models with different compliance postures — e.g. a local
-   model cleared for PII vs. an external model that isn't — risks leaking
-   sensitive data across an egress boundary *through the classification
-   call itself*, independent of which model ultimately serves the request.
-   The same research found that turn-level embeddings (not
-   whole-conversation) are also needed to avoid semantic dilution as
-   context grows.
+2. **A compliance/security question.** Routing on shared context across
+   models with different compliance postures — e.g. a local model cleared
+   for PII vs. an external model that isn't — risks leaking sensitive data
+   across an egress boundary *through the classification call itself*,
+   independent of which model ultimately serves the request. Turn-level
+   embeddings (not whole-conversation) are also needed to avoid semantic
+   dilution as context grows.
 
 Both open questions are independently corroborated by
 [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) — a
@@ -180,15 +170,13 @@ production semantic-routing layer for AI gateways (the reference
 implementation for Envoy AI Gateway's semantic routing). Its architecture
 treats safety/compliance signals as first-class and parallel to routing
 classification specifically to avoid the same side-channel risk, and its
-multi-turn handling is turn-scoped by default. A revised recommendation
-grounded in this precedent — defaulting to local classification for the
-routing decision rather than an external API — was posted on
-[ai#715](https://github.com/praxis-proxy/ai/issues/715#issuecomment-5293888816)
-and confirmed by `@cnuland` on `ai#750` ("I'd frame the initial
-architecture as local classification inside the trusted inference
-boundary rather than routing every prompt to an external embedding
-provider"). The `How?` section of this proposal will follow once the open
-questions below are resolved, per this repo's proposal convention.
+multi-turn handling is turn-scoped by default. Defaulting to local
+classification for the routing decision rather than an external API —
+[confirmed on `ai#750`](https://github.com/praxis-proxy/ai/pull/750#issuecomment-5297381194) —
+is the right default: local classification inside the trusted inference
+boundary, not routing every prompt to an external embedding provider. The
+`How?` section of this proposal will follow once the open questions below
+are resolved, per this repo's proposal convention.
 
 ### Open Questions
 
@@ -221,26 +209,41 @@ block writing `How?`:
    from the "candidate v2" Non-Goal above into v1 scope? Unresolved as of
    this writing.
 3. **Sidecar call must use `SubRequestConnector`/`SubRequestClient`, not a
-   bare HTTP client.** Code inspection while drafting this proposal found
-   that `ai_guardrails`' external-provider call ([#755](https://github.com/praxis-proxy/ai/issues/755))
-   bypasses Praxis's own sub-request executor (`praxis-core`'s
+   bare HTTP client.** `ai_guardrails`'s external-provider call
+   ([#755](https://github.com/praxis-proxy/ai/issues/755)) bypasses
+   Praxis's own sub-request executor (`praxis-core`'s
    `SubRequestConnector`/`SubRequestClient`), so it has no admission cap,
    no circuit breaker, and no unified deadline — a degraded provider costs
    every concurrent request the full configured timeout instead of
    fast-failing. The classifier sidecar call proposed in Open Question 1
-   above should not repeat this: it must be wired through
-   `SubRequestConnector`/`SubRequestClient` from the start so a degraded
-   or overloaded sidecar fails fast and sheds load rather than amplifying
-   latency as request volume grows. Latency-budget note: for the v1
-   default (local embedding model, current-turn-only, no cross-turn
-   caching per the Goals above), published benchmarks for the underlying
-   model put single-sentence CPU inference around 10–30ms — small next to
-   typical LLM-based guardrail-provider latencies (several hundred ms to
-   ~1s per published NeMo Guardrails benchmarks), so no separate
-   parallel-execution optimization against `ai_guardrails` is proposed for
-   v1. This should be revisited only if a future classification backend
-   (the technique-agnostic contract permits e.g. an LLM-based classifier)
-   brings classify latency into the same order of magnitude as guardrails.
+   must not repeat this: wiring through `SubRequestConnector`/
+   `SubRequestClient` from the start lets a degraded or overloaded sidecar
+   fail fast and shed load rather than amplify latency as request volume
+   grows. Latency budget: v1's default (local embedding model,
+   current-turn-only, no cross-turn caching) runs single-sentence CPU
+   inference around 10–30ms per published benchmarks for the underlying
+   model — small next to typical LLM-based guardrail-provider latencies
+   (several hundred ms to ~1s per published NeMo Guardrails benchmarks), so
+   no parallel-execution optimization against `ai_guardrails` is proposed
+   for v1; revisit only if a future classification backend brings classify
+   latency into the same order of magnitude as guardrails.
+4. **Observability for the four-state classification outcome.** The
+   `intelligent_route` filter already has a precedent for this shape of
+   problem — [`grid#13`](https://github.com/praxis-proxy/grid/issues/13)
+   requires a structured logging contract distinguishing its own six
+   routing-outcome scenarios, specifically so operators can tell them apart
+   without guessing. `semantic_classifier`'s four states need the same
+   treatment so the SRE user story below (paging only on `unavailable`, not
+   on `unclassified`) is actually actionable; exact fields/events are a
+   `How?` decision.
+5. **Is response-side classification (Non-Goals) an architectural boundary
+   or a v1-scoping choice?** Proposed reading: a routing decision requires
+   selecting a backend before a response exists, so classifying model
+   *output* for the purpose of choosing a backend isn't coherent at any
+   version, unlike the other Non-Goals above (which are genuinely
+   deferred v2 candidates). No reviewer has raised this point either way —
+   flagging it here for confirmation rather than asserting it in Non-Goals
+   outright.
 
 ### User Stories
 
@@ -265,5 +268,7 @@ block writing `How?`:
 - As an SRE/operator, I want to distinguish "the classifier confidently
   chose not to classify this request" from "the classification system is
   broken" so that only the latter pages anyone or affects availability
-  SLOs, and so that a broken classifier degrades to structured routing
-  rather than silently guessing or falling back to an external service.
+  SLOs.
+- As an SRE/operator, I want semantic routing failure modes that enable me
+  to decide how to proceed when a classifier fails — via `intelligent_route`'s
+  existing fallback-candidate configuration, not a new knob on this filter.
