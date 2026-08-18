@@ -20,6 +20,7 @@ mod filter_docs;
 mod inference_fixtures;
 mod lint_deps;
 mod lint_example_tests;
+mod lint_extended;
 mod lint_markdown_links;
 mod lint_separators;
 mod make_replay_fixture;
@@ -66,6 +67,10 @@ enum Command {
     /// Check that every example config has a corresponding
     /// integration test.
     LintExampleTests(lint_example_tests::Args),
+
+    /// Diff-scoped heuristic checks for low-quality-code patterns that
+    /// Clippy can't catch structurally.
+    LintExtended(lint_extended::Args),
 
     /// Check that local Markdown link targets exist.
     LintMarkdownLinks(lint_markdown_links::Args),
@@ -122,6 +127,7 @@ fn main() {
         Command::Debug(args) => debug::run(&args),
         Command::LintDeps(args) => lint_deps::run(args),
         Command::LintExampleTests(args) => lint_example_tests::run(args),
+        Command::LintExtended(args) => lint_extended::run(&args),
         Command::LintMarkdownLinks(args) => lint_markdown_links::run(args),
         Command::LintSeparators(args) => lint_separators::run(args),
         Command::ImportInference(args) => inference_fixtures::run_import(args),

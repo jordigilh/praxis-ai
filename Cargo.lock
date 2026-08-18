@@ -6074,6 +6074,7 @@ dependencies = [
  "praxis-proxy-core",
  "praxis-test-utils",
  "quote",
+ "regex",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

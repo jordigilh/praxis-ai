@@ -132,6 +132,16 @@ Security is enforced at the lint level. See lints in
 [Cargo.toml]:Cargo.toml
 [getting-started.md]:docs/developing/getting-started.md
 
+### Extended Lint
+
+`make lint` also runs `cargo xtask lint-extended`, a diff-scoped
+heuristic check for low-effort-code smells that Clippy can't catch
+structurally: leftover `TODO`/`FIXME`/`HACK` markers, commented-out
+code, "narrating" comments that just restate the next line, and
+literals repeated 3+ times in a PR's added lines instead of being
+hoisted to a named constant. It only scans lines added or changed
+versus the diff base, so pre-existing code is never relitigated.
+
 ### Lint Suppression Policy
 
 Use `#[expect(...)]` instead of `#[allow(...)]`. The

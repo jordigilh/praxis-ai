@@ -110,6 +110,7 @@ lint:
 	cargo xtask lint-filter-docs
 	cargo xtask lint-example-tests
 	cargo xtask lint-markdown-links
+	cargo xtask lint-extended
 	cargo xtask sync-example-readme
 	cargo xtask sync-inference-readme
 	cargo xtask sync-responses-readme
