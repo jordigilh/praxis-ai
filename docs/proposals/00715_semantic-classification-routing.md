@@ -174,9 +174,7 @@ multi-turn handling is turn-scoped by default. Defaulting to local
 classification for the routing decision rather than an external API —
 [confirmed on `ai#750`](https://github.com/praxis-proxy/ai/pull/750#issuecomment-5297381194) —
 is the right default: local classification inside the trusted inference
-boundary, not routing every prompt to an external embedding provider. The
-`How?` section of this proposal will follow once the open questions below
-are resolved, per this repo's proposal convention.
+boundary, not routing every prompt to an external embedding provider.
 
 ### Open Questions
 
