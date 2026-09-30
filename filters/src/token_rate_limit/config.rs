@@ -832,6 +832,13 @@ pub(super) struct BackendConfig {
     /// Key namespace prefix, so multiple filter rules or deployments can
     /// share one Valkey instance without colliding. Ignored for
     /// `kind: memory`. Defaults to `"praxis:token_rate_limit"` when unset.
+    ///
+    /// Valkey permanently records a schema-versioned fingerprint for each
+    /// namespace/rule/algorithm identity. Replicas with a different window,
+    /// capacity, refill rate, reservation timeout, or state bound fail closed
+    /// with 503 before mutating shared state. To make an intentional semantic
+    /// change, drain/reset the old state and use a new namespace generation;
+    /// changing configuration in place is deliberately rejected.
     #[serde(default)]
     pub namespace: Option<String>,
 }
