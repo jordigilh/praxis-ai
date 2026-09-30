@@ -15,13 +15,16 @@ use std::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
 use metrics::counter;
 use praxis_ai_apis::hash::Sha256;
-use redis::aio::MultiplexedConnection;
+use redis::{
+    aio::MultiplexedConnection,
+    sentinel::{SentinelClient, SentinelServerType},
+};
 use tokio::sync::mpsc;
 
 use super::{
@@ -29,10 +32,66 @@ use super::{
     token_bucket_ledger::{self, TokenBucketLedger},
 };
 
-/// Bound on every Valkey network operation (connect or `EVAL`), so an
-/// unreachable-but-not-yet-timed-out-at-the-OS-level backend still fails
-/// closed quickly rather than hanging the request indefinitely.
-const VALKEY_TIMEOUT: Duration = Duration::from_millis(500);
+/// Backward-compatible standalone connection timeout.
+pub(super) const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Backward-compatible command response timeout.
+pub(super) const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Default overall bound for Sentinel traversal, failover convergence, and
+/// discovered-primary connection establishment.
+pub(super) const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Delay between read-only Sentinel discovery attempts. The complete loop is
+/// still bounded by [`ValkeyTimeouts::discovery`].
+const SENTINEL_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Record one read-only Sentinel discovery attempt with bounded labels.
+pub(super) fn record_primary_discovery_attempt(backend: &'static str, result: &'static str) {
+    counter!(
+        "praxis_trl_primary_discovery_attempts_total",
+        "backend" => backend,
+        "result" => result,
+    )
+    .increment(1);
+}
+
+/// Record one cached data connection result.
+pub(super) fn record_backend_connection(
+    backend: &'static str,
+    topology: &'static str,
+    phase: &'static str,
+    result: &'static str,
+) {
+    counter!(
+        "praxis_trl_backend_connections_total",
+        "backend" => backend,
+        "phase" => phase,
+        "result" => result,
+        "topology" => topology,
+    )
+    .increment(1);
+}
+
+/// Record one coalesced Sentinel primary rediscovery result.
+pub(super) fn record_primary_rediscovery(backend: &'static str, result: &'static str) {
+    counter!(
+        "praxis_trl_primary_rediscoveries_total",
+        "backend" => backend,
+        "result" => result,
+    )
+    .increment(1);
+}
+
+/// Record one stale cached connection invalidation.
+pub(super) fn record_connection_invalidation(backend: &'static str, topology: &'static str) {
+    counter!(
+        "praxis_trl_backend_connection_invalidations_total",
+        "backend" => backend,
+        "topology" => topology,
+    )
+    .increment(1);
+}
 
 /// Version of the accounting semantics encoded by Valkey configuration
 /// fingerprints. Bump this whenever an existing state value would be
@@ -243,6 +302,27 @@ impl ValkeyTelemetryState {
         }
     }
 
+    /// Decode a Lua reconciliation reply and publish its telemetry suffix.
+    fn parse_reconcile_reply(&self, response: &[i64]) -> Result<BackendSettlement, BackendError> {
+        match response {
+            [3] => Err(BackendError::ConfigurationMismatch),
+            [0, remaining, active, keys] => {
+                self.record_reply(*remaining, *active, *keys)?;
+                Ok(BackendSettlement::Noop)
+            },
+            [1, actual, refund, overage, remaining, active, keys] => {
+                let settlement = BackendSettlement::Applied {
+                    actual: u64::try_from(*actual).map_err(|_error| BackendError::InvalidResponse)?,
+                    refund: u64::try_from(*refund).map_err(|_error| BackendError::InvalidResponse)?,
+                    overage: u64::try_from(*overage).map_err(|_error| BackendError::InvalidResponse)?,
+                };
+                self.record_reply(*remaining, *active, *keys)?;
+                Ok(settlement)
+            },
+            _ => Err(BackendError::InvalidResponse),
+        }
+    }
+
     /// Replace the complete last-observed snapshot.
     fn update(&self, budget_remaining: u64, active_reservations: usize, active_keys: usize) {
         self.budget_remaining.store(budget_remaining, Ordering::Relaxed);
@@ -263,9 +343,14 @@ impl ValkeyTelemetryState {
 /// Failure modes shared by every [`TokenRateLimitStateBackend`] impl.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum BackendError {
-    /// The backend could not be reached or timed out.
+    /// The operation failed before a mutation was dispatched, or the server
+    /// explicitly rejected it before execution.
     #[error("shared quota backend unavailable: {0}")]
     Unavailable(String),
+    /// A dispatched mutation failed without a response proving whether it was
+    /// applied. It must never be replayed automatically.
+    #[error("shared quota backend mutation outcome is unconfirmed: {0}")]
+    Unconfirmed(String),
     /// The backend responded, but not in the expected shape.
     #[error("shared quota backend returned an invalid response")]
     InvalidResponse,
@@ -273,6 +358,56 @@ pub(super) enum BackendError {
     /// configuration for the same namespace/rule/algorithm identity.
     #[error("shared quota backend accounting configuration does not match existing state")]
     ConfigurationMismatch,
+}
+
+/// Observable fail-open classification for a failed admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AdmissionFailureOutcome {
+    /// The reservation is known not to have run.
+    Bypassed,
+    /// The reservation may have committed before the failure was observed.
+    Unconfirmed,
+}
+
+impl AdmissionFailureOutcome {
+    /// Stable bounded telemetry value.
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bypassed => "bypassed",
+            Self::Unconfirmed => "unconfirmed",
+        }
+    }
+}
+
+impl BackendError {
+    /// Stable bounded value for structured accounting records.
+    pub(super) const fn kind(&self) -> &'static str {
+        match self {
+            Self::Unavailable(_) => "unavailable",
+            Self::Unconfirmed(_) => "unconfirmed",
+            Self::InvalidResponse => "invalid_response",
+            Self::ConfigurationMismatch => "configuration_mismatch",
+        }
+    }
+
+    /// Classify dependency failures eligible for `backend.on_failure: open`.
+    /// A configuration mismatch is intentionally excluded and always fails
+    /// closed. An invalid successful reply follows dispatch and is therefore
+    /// conservatively unconfirmed.
+    pub(super) const fn admission_failure_outcome(&self) -> Option<AdmissionFailureOutcome> {
+        match self {
+            Self::Unavailable(_) => Some(AdmissionFailureOutcome::Bypassed),
+            Self::Unconfirmed(_) | Self::InvalidResponse => Some(AdmissionFailureOutcome::Unconfirmed),
+            Self::ConfigurationMismatch => None,
+        }
+    }
+
+    /// Whether retrying a reconciliation is safe because the failed attempt is
+    /// known not to have mutated shared state. Ambiguous command failures and
+    /// malformed successful replies are deliberately never replayed.
+    const fn reconciliation_retry_is_safe(&self) -> bool {
+        matches!(self, Self::Unavailable(_))
+    }
 }
 
 /// Where sliding-window admission state lives: in-process or shared.
@@ -605,7 +740,7 @@ where
                     record_completed_reconciliation(&worker, &settlement);
                     break;
                 },
-                Err(error) if attempts < 2 => {
+                Err(error) if error.reconciliation_retry_is_safe() && attempts < 2 => {
                     attempts += 1;
                     tracing::warn!(attempts, %error, "token-rate-limit reconciliation retry");
                     tokio::time::sleep(Duration::from_millis(25 * attempts)).await;
@@ -645,112 +780,358 @@ fn record_abandoned_reconciliation(backend: &impl TokenRateLimitStateBackend, er
         algorithm = backend.algorithm_name(),
         backend = backend.backend_name(),
         result = "failed",
-        error = %error,
+        error = error.kind(),
         "token rate limit accounting"
     );
-    tracing::error!(%error, "token-rate-limit reconciliation abandoned after retries");
+    tracing::error!(%error, "token-rate-limit reconciliation abandoned");
 }
 
-/// Shared Valkey connection handling for every Valkey-backed algorithm:
-/// reusing one cached multiplexed connection across calls and running
-/// `EVAL`s against it, both bounded by [`VALKEY_TIMEOUT`] -- enforced by
-/// the `redis` crate itself (see [`Self::connection`]), not by wrapping
-/// calls in our own `tokio::time::timeout` -- so an unreachable/wedged
-/// backend fails closed quickly instead of hanging the request.
-///
-/// Built once per filter instance (not per rule) and `Clone`d into every
-/// Valkey-backed rule's [`ValkeyBackendConfig`]/[`ValkeyTokenBucketConfig`]
-/// -- cloning is cheap (`redis::Client` is a plain [`Clone`] wrapper
-/// around connection info, and `connection` below is `Arc`-shared), so
-/// every rule ends up sharing the same one multiplexed connection
-/// instead of opening a redundant one per rule pointed at the same URL.
+/// Validated bounds for shared-backend network work.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ValkeyTimeouts {
+    /// Data-node connection attempt.
+    pub(super) connect: Duration,
+    /// One command response after dispatch.
+    pub(super) operation: Duration,
+    /// Complete Sentinel discovery and connection loop.
+    pub(super) discovery: Duration,
+}
+
+impl Default for ValkeyTimeouts {
+    fn default() -> Self {
+        Self {
+            connect: DEFAULT_CONNECT_TIMEOUT,
+            operation: DEFAULT_OPERATION_TIMEOUT,
+            discovery: DEFAULT_DISCOVERY_TIMEOUT,
+        }
+    }
+}
+
+/// Standalone client or immutable Sentinel discovery inputs.
+enum ValkeyTopology {
+    /// One fixed data-node URL.
+    Standalone(Box<redis::Client>),
+    /// Multiple Sentinel URLs and one monitored primary service.
+    Sentinel {
+        /// Ordered Sentinel connection URLs.
+        endpoints: Vec<String>,
+        /// Monitored writable-primary service name.
+        service_name: String,
+    },
+}
+
+impl ValkeyTopology {
+    /// Stable, bounded telemetry label.
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Standalone(_) => "standalone",
+            Self::Sentinel { .. } => "sentinel",
+        }
+    }
+}
+
+/// One cached primary connection and its monotonic identity. The generation
+/// prevents a late error from an old socket from evicting a freshly discovered
+/// primary installed by another concurrent request.
+struct CachedConnection {
+    /// Multiplexed writable-primary connection.
+    connection: MultiplexedConnection,
+    /// Identity used for conditional invalidation.
+    generation: u64,
+}
+
+/// Shared cache state. Holding the mutex while establishing a connection
+/// intentionally coalesces concurrent initial discovery and rediscovery.
+#[derive(Default)]
+struct ConnectionCache {
+    /// Currently reusable connection, if one has been established.
+    current: Option<CachedConnection>,
+    /// Generation assigned to the next successful connection.
+    next_generation: u64,
+}
+
+/// A cheap handle returned to one operation.
+struct AcquiredConnection {
+    /// Cheap clone of the cached multiplexed handle.
+    connection: MultiplexedConnection,
+    /// Generation observed with the handle.
+    generation: u64,
+}
+
+/// Shared Redis/Valkey connection handling for every networked algorithm.
+/// Healthy operations reuse one cached multiplexed writable-primary
+/// connection, so Sentinel adds no steady-state command or network round trip.
+/// A failed dispatched mutation is never replayed: the stale generation is
+/// invalidated and only a later operation performs bounded rediscovery.
 #[derive(Clone)]
 pub(super) struct ValkeyEval {
-    /// Lazy Valkey/Redis client, used only to (re-)establish
-    /// `connection` below.
-    client: redis::Client,
-
-    /// Cached multiplexed connection, established on first use and
-    /// reused by every subsequent call (a `MultiplexedConnection` is a
-    /// cheap-to-clone handle onto one shared pipelined connection, not
-    /// a dedicated socket per clone) -- paying a fresh TCP/TLS handshake
-    /// on every request would defeat the point of a "multiplexed"
-    /// connection and add unnecessary latency to the request path.
-    /// Cleared by [`Self::invalidate`] after a failed command, so the
-    /// next call re-establishes it rather than reusing a
-    /// wedged/reset one indefinitely.
-    connection: Arc<tokio::sync::Mutex<Option<MultiplexedConnection>>>,
+    /// Configured equivalent selector (`redis` or `valkey`) for bounded
+    /// operator-facing telemetry.
+    backend_name: &'static str,
+    /// Fixed standalone target or Sentinel discovery inputs.
+    topology: Arc<ValkeyTopology>,
+    /// Validated bounds for all network work.
+    timeouts: ValkeyTimeouts,
+    /// Shared, rediscovery-coalescing writable-primary cache.
+    connection: Arc<tokio::sync::Mutex<ConnectionCache>>,
 }
 
 impl ValkeyEval {
-    /// Open a (lazy, not-yet-connected) Valkey client.
+    /// Open a backward-compatible standalone client with the historic 500ms
+    /// connection and operation bounds.
     ///
     /// # Errors
     ///
-    /// Returns [`BackendError::Unavailable`] if `url` isn't a well-formed
-    /// Valkey/Redis connection URL.
+    /// Returns [`BackendError::Unavailable`] if `url` is malformed.
+    #[cfg(test)]
     pub(super) fn new(url: String) -> Result<Self, BackendError> {
-        let client = redis::Client::open(url).map_err(|e| BackendError::Unavailable(e.to_string()))?;
+        Self::standalone(url, ValkeyTimeouts::default(), "valkey")
+    }
+
+    /// Open a lazy standalone client with validated custom timeouts.
+    pub(super) fn standalone(
+        url: String,
+        timeouts: ValkeyTimeouts,
+        backend_name: &'static str,
+    ) -> Result<Self, BackendError> {
+        let client = redis::Client::open(url)
+            .map_err(|error| BackendError::Unavailable(format!("Redis/Valkey configuration: {error}")))?;
         Ok(Self {
-            client,
-            connection: Arc::new(tokio::sync::Mutex::new(None)),
+            backend_name,
+            topology: Arc::new(ValkeyTopology::Standalone(Box::new(client))),
+            timeouts,
+            connection: Arc::new(tokio::sync::Mutex::new(ConnectionCache::default())),
         })
     }
 
-    /// Return the cached multiplexed connection, establishing (and
-    /// caching) a fresh one on first use or after a prior failure
-    /// invalidated it. The `redis` crate bounds both the connection
-    /// attempt itself and every command later sent over it to
-    /// [`VALKEY_TIMEOUT`] (via [`Self::connection_config`]), so an
-    /// unreachable or wedged Valkey fails closed rather than hanging
-    /// the request indefinitely -- we don't additionally wrap this in
-    /// our own `tokio::time::timeout`, which would just race the
-    /// crate's own enforcement of the same bound.
-    async fn connection(&self) -> Result<MultiplexedConnection, BackendError> {
-        let mut cached = self.connection.lock().await;
-        if let Some(connection) = cached.as_ref() {
-            let connection = connection.clone();
-            drop(cached);
-            return Ok(connection);
-        }
-        let connection = self
-            .client
-            .get_multiplexed_async_connection_with_config(&Self::connection_config())
-            .await
-            .map_err(|error| map_valkey_error("connection", &error))?;
-        *cached = Some(connection.clone());
-        drop(cached);
-        Ok(connection)
+    /// Build a lazy Sentinel client. Construction validates endpoint URLs;
+    /// network discovery remains deferred until the first operation.
+    pub(super) fn sentinel(
+        endpoints: Vec<String>,
+        service_name: String,
+        timeouts: ValkeyTimeouts,
+        backend_name: &'static str,
+    ) -> Result<Self, BackendError> {
+        SentinelClient::build(
+            endpoints.clone(),
+            service_name.clone(),
+            None,
+            SentinelServerType::Master,
+        )
+        .map_err(|error| BackendError::Unavailable(format!("Redis/Valkey Sentinel configuration: {error}")))?;
+        Ok(Self {
+            backend_name,
+            topology: Arc::new(ValkeyTopology::Sentinel {
+                endpoints,
+                service_name,
+            }),
+            timeouts,
+            connection: Arc::new(tokio::sync::Mutex::new(ConnectionCache::default())),
+        })
     }
 
-    /// [`redis::AsyncConnectionConfig`] binding both the connection
-    /// attempt and every command's response to [`VALKEY_TIMEOUT`].
-    /// Without this, `redis` still applies its own defaults (500ms
-    /// response, 1s connect, as of `redis` 1.6) -- close to, but not
-    /// exactly, this crate's own documented bound, and liable to drift
-    /// further from it silently on a future `redis` upgrade.
-    fn connection_config() -> redis::AsyncConnectionConfig {
+    /// `redis-rs` bounds a direct data-node connect and every later command
+    /// response with these values. Sentinel traversal is additionally wrapped
+    /// by the one overall discovery deadline.
+    fn connection_config(&self) -> redis::AsyncConnectionConfig {
         redis::AsyncConnectionConfig::new()
-            .set_connection_timeout(Some(VALKEY_TIMEOUT))
-            .set_response_timeout(Some(VALKEY_TIMEOUT))
+            .set_connection_timeout(Some(self.timeouts.connect))
+            .set_response_timeout(Some(self.timeouts.operation))
     }
 
-    /// Drop the cached connection so the next call re-establishes it.
-    async fn invalidate(&self) {
-        *self.connection.lock().await = None;
+    /// Establish a standalone connection or perform one complete bounded
+    /// Sentinel discovery loop. Sentinel attempts are read-only and may be
+    /// retried; no mutation is ever issued here.
+    async fn connect(&self, deadline: Instant) -> Result<MultiplexedConnection, BackendError> {
+        match self.topology.as_ref() {
+            ValkeyTopology::Standalone(client) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(BackendError::Unavailable(
+                        "Redis/Valkey connection deadline elapsed before connection establishment".into(),
+                    ));
+                }
+                tokio::time::timeout(
+                    remaining,
+                    client.get_multiplexed_async_connection_with_config(&self.connection_config()),
+                )
+                .await
+                .map_err(|_elapsed| BackendError::Unavailable("Redis/Valkey connection deadline elapsed".into()))?
+                .map_err(|error| map_valkey_error("connection", &error))
+            },
+            ValkeyTopology::Sentinel {
+                endpoints,
+                service_name,
+            } => Box::pin(self.connect_sentinel(endpoints, service_name, deadline)).await,
+        }
     }
 
-    /// Run one `EVAL script KEYS... ARGV...` command against the cached
-    /// connection (see [`Self::connection`]), invalidating it on any
-    /// failure -- including a [`VALKEY_TIMEOUT`] response timeout,
-    /// enforced by `redis` itself, see [`Self::connection_config`] --
-    /// so a subsequent call doesn't keep retrying a wedged/reset one.
-    async fn eval<const N: usize>(
+    /// Retry read-only Sentinel traversal and primary connection setup within
+    /// one overall deadline. Rebuilding the client on each attempt avoids
+    /// carrying a stale internal Sentinel cache across failover convergence.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one bounded retry loop owns attempt timing, telemetry, and final classification"
+    )]
+    async fn connect_sentinel(
+        &self,
+        endpoints: &[String],
+        service_name: &str,
+        deadline: Instant,
+    ) -> Result<MultiplexedConnection, BackendError> {
+        let mut attempts = 0_u64;
+        let mut last_error = None;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            attempts = attempts.saturating_add(1);
+            let attempt = Box::pin(async {
+                // `SentinelClient::build` consumes its endpoint list. These are
+                // immutable configuration strings, not request/payload data.
+                let mut client =
+                    SentinelClient::build(endpoints.to_vec(), service_name, None, SentinelServerType::Master)?;
+                client.get_async_connection_with_config(&self.connection_config()).await
+            });
+            match tokio::time::timeout(remaining, attempt).await {
+                Ok(Ok(connection)) => {
+                    record_primary_discovery_attempt(self.backend_name, "success");
+                    return Ok(connection);
+                },
+                Ok(Err(error)) => {
+                    record_primary_discovery_attempt(self.backend_name, "retry");
+                    last_error = Some(error);
+                },
+                Err(_elapsed) => {
+                    record_primary_discovery_attempt(self.backend_name, "timeout");
+                    break;
+                },
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if !remaining.is_zero() {
+                tokio::time::sleep(SENTINEL_RETRY_INTERVAL.min(remaining)).await;
+            }
+        }
+        let detail = last_error.map_or_else(|| "deadline elapsed".to_owned(), |error| error.to_string());
+        Err(BackendError::Unavailable(format!(
+            "Redis/Valkey Sentinel discovery exceeded {:?} after {attempts} attempts: {detail}",
+            self.timeouts.discovery
+        )))
+    }
+
+    /// Return the cached writable-primary connection or coalesce one bounded
+    /// connection/discovery attempt while holding the shared cache mutex.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "cache hit, coalesced connection, telemetry, and generation install are one atomic flow"
+    )]
+    async fn acquired_connection(&self) -> Result<AcquiredConnection, BackendError> {
+        let budget = match self.topology.as_ref() {
+            ValkeyTopology::Standalone(_) => self.timeouts.connect,
+            ValkeyTopology::Sentinel { .. } => self.timeouts.discovery,
+        };
+        let deadline = Instant::now()
+            .checked_add(budget)
+            .ok_or_else(|| BackendError::Unavailable("Redis/Valkey connection deadline overflow".into()))?;
+        let mut cache = tokio::time::timeout(budget, self.connection.lock())
+            .await
+            .map_err(|_elapsed| {
+                BackendError::Unavailable(format!(
+                    "Redis/Valkey {} connection cache wait exceeded {budget:?}",
+                    self.topology.label()
+                ))
+            })?;
+        if let Some(cached) = cache.current.as_ref() {
+            return Ok(AcquiredConnection {
+                connection: cached.connection.clone(),
+                generation: cached.generation,
+            });
+        }
+        let rediscovery = cache.next_generation > 0;
+        let phase = if rediscovery { "rediscovery" } else { "initial" };
+        let result = self.connect(deadline).await;
+        record_backend_connection(
+            self.backend_name,
+            self.topology.label(),
+            phase,
+            if result.is_ok() { "success" } else { "failed" },
+        );
+        if rediscovery && matches!(self.topology.as_ref(), ValkeyTopology::Sentinel { .. }) {
+            let result_label = if result.is_ok() { "success" } else { "failed" };
+            record_primary_rediscovery(self.backend_name, result_label);
+            if result.is_ok() {
+                tracing::info!(
+                    target: "praxis_ai::token_rate_limit::backend",
+                    backend = self.backend_name,
+                    topology = "sentinel",
+                    phase = "rediscovery",
+                    result = result_label,
+                    "token rate limit backend connection"
+                );
+            } else {
+                tracing::warn!(
+                    target: "praxis_ai::token_rate_limit::backend",
+                    backend = self.backend_name,
+                    topology = "sentinel",
+                    phase = "rediscovery",
+                    result = result_label,
+                    "token rate limit backend connection"
+                );
+            }
+        }
+        let connection = result?;
+        let generation = cache.next_generation;
+        cache.next_generation = cache.next_generation.saturating_add(1);
+        cache.current = Some(CachedConnection {
+            connection: connection.clone(),
+            generation,
+        });
+        let acquired = AcquiredConnection { connection, generation };
+        drop(cache);
+        Ok(acquired)
+    }
+
+    /// Expose a connection handle to this module's live integration tests.
+    /// Production mutations use [`Self::acquired_connection`] so they retain
+    /// the generation needed for race-safe invalidation.
+    #[cfg(test)]
+    async fn connection(&self) -> Result<MultiplexedConnection, BackendError> {
+        Ok(self.acquired_connection().await?.connection)
+    }
+
+    /// Invalidate only the generation that failed. A late error from an old
+    /// connection must not evict a newer primary installed concurrently.
+    async fn invalidate(&self, generation: u64) {
+        let mut cache = self.connection.lock().await;
+        let invalidated = cache.current.as_ref().map(|cached| cached.generation) == Some(generation);
+        if invalidated {
+            cache.current = None;
+        }
+        drop(cache);
+        if invalidated {
+            record_connection_invalidation(self.backend_name, self.topology.label());
+            tracing::warn!(
+                target: "praxis_ai::token_rate_limit::backend",
+                backend = self.backend_name,
+                topology = self.topology.label(),
+                phase = "connection",
+                result = "invalidated",
+                "token rate limit backend connection"
+            );
+        }
+    }
+
+    /// Dispatch one mutation exactly once against the cached primary. Any
+    /// command error invalidates that generation for the next request, but
+    /// this call never redispatches the script because a timeout/disconnect is
+    /// ambiguous.
+    async fn dispatch<const N: usize>(
         &self,
         script: &str,
         keys: &[String; N],
         args: &[String],
-    ) -> Result<Vec<i64>, BackendError> {
+    ) -> Result<(Vec<i64>, u64), BackendError> {
         let mut command = redis::cmd("EVAL");
         command.arg(script).arg(keys.len());
         for key in keys {
@@ -759,24 +1140,65 @@ impl ValkeyEval {
         for arg in args {
             command.arg(arg);
         }
-        let mut connection = self.connection().await?;
-        let result: redis::RedisResult<Vec<i64>> = command.query_async(&mut connection).await;
+        let mut acquired = self.acquired_connection().await?;
+        let result: redis::RedisResult<Vec<i64>> = command.query_async(&mut acquired.connection).await;
         match result {
-            Ok(value) => Ok(value),
+            Ok(value) => Ok((value, acquired.generation)),
             Err(error) => {
-                self.invalidate().await;
+                self.invalidate(acquired.generation).await;
                 Err(map_valkey_error("command", &error))
             },
         }
     }
+
+    /// Dispatch and parse one mutation reply. A malformed successful reply is
+    /// unconfirmed, so invalidate the exact connection generation just as for
+    /// an ambiguous transport failure.
+    async fn eval_parsed<const N: usize, T>(
+        &self,
+        script: &str,
+        keys: &[String; N],
+        args: &[String],
+        parse: impl FnOnce(&[i64]) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        let (response, generation) = self.dispatch(script, keys, args).await?;
+        let parsed = parse(&response);
+        if matches!(parsed, Err(BackendError::InvalidResponse)) {
+            self.invalidate(generation).await;
+        }
+        parsed
+    }
+
+    /// Raw test adapter for fault injection and topology qualification.
+    #[cfg(test)]
+    async fn eval<const N: usize>(
+        &self,
+        script: &str,
+        keys: &[String; N],
+        args: &[String],
+    ) -> Result<Vec<i64>, BackendError> {
+        self.dispatch(script, keys, args)
+            .await
+            .map(|(response, _generation)| response)
+    }
 }
 
-/// Wrap a [`redis::RedisError`] as a [`BackendError::Unavailable`],
-/// tagged with which phase (`"connection"` or `"command"`) it came
-/// from -- `redis`'s own error text (e.g. plain `"timed out"` for a
-/// response-timeout) doesn't say which on its own.
+/// Server errors that prove a mutation was rejected before execution. All
+/// transport failures and other script errors remain conservatively
+/// unconfirmed because Lua errors can occur after partial state mutation.
+fn command_known_not_applied(error: &redis::RedisError) -> bool {
+    matches!(error.code(), Some("NOREPLICAS" | "READONLY" | "MASTERDOWN"))
+}
+
+/// Preserve whether a failure occurred before or after mutation dispatch so
+/// `on_failure: open` can distinguish bypassed from unconfirmed admission.
 fn map_valkey_error(phase: &'static str, error: &redis::RedisError) -> BackendError {
-    BackendError::Unavailable(format!("Valkey {phase}: {error}"))
+    let message = format!("Redis/Valkey {phase}: {error}");
+    if phase == "connection" || command_known_not_applied(error) {
+        BackendError::Unavailable(message)
+    } else {
+        BackendError::Unconfirmed(message)
+    }
 }
 
 /// Shared background-reconciliation scaffolding for every Valkey-backed
@@ -900,8 +1322,8 @@ pub(super) struct ValkeyBackendConfig {
 }
 
 impl ValkeyTokenRateLimitBackend {
-    /// Build this rule's backend from an already-open, filter-shared
-    /// [`ValkeyEval`] connection.
+    /// Build this rule's backend from a filter-shared [`ValkeyEval`] client and
+    /// lazy connection cache.
     pub(super) fn new(config: ValkeyBackendConfig) -> Self {
         let limit = config.budgets.iter().map(|budget| budget.capacity).min().unwrap_or(0);
         let config_fingerprint = sliding_window_config_fingerprint(
@@ -1028,8 +1450,11 @@ impl TokenRateLimitStateBackend for ValkeyTokenRateLimitBackend {
     async fn reserve(&self, request: ReserveRequest) -> Result<BackendReserve, BackendError> {
         let keys = self.key_parts(&request.key);
         let args = self.reserve_args(&request);
-        let response = self.valkey.eval(RESERVE_SCRIPT, &keys, &args).await?;
-        self.telemetry.parse_reserve_reply(&response)
+        self.valkey
+            .eval_parsed(RESERVE_SCRIPT, &keys, &args, |response| {
+                self.telemetry.parse_reserve_reply(response)
+            })
+            .await
     }
 
     async fn reconcile(&self, request: ReconcileRequest) -> Result<BackendSettlement, BackendError> {
@@ -1046,23 +1471,11 @@ impl TokenRateLimitStateBackend for ValkeyTokenRateLimitBackend {
             args.push(budget.capacity.to_string());
         }
         args.push(self.config_fingerprint.clone());
-        let response = self.valkey.eval(RECONCILE_SCRIPT, &keys, &args).await?;
-        match response.as_slice() {
-            [3] => Err(BackendError::ConfigurationMismatch),
-            [0, remaining, active, keys] => {
-                self.telemetry.record_reply(*remaining, *active, *keys)?;
-                Ok(BackendSettlement::Noop)
-            },
-            [1, actual, refund, overage, remaining, active, keys] => {
-                self.telemetry.record_reply(*remaining, *active, *keys)?;
-                Ok(BackendSettlement::Applied {
-                    actual: u64::try_from(*actual).map_err(|_error| BackendError::InvalidResponse)?,
-                    refund: u64::try_from(*refund).map_err(|_error| BackendError::InvalidResponse)?,
-                    overage: u64::try_from(*overage).map_err(|_error| BackendError::InvalidResponse)?,
-                })
-            },
-            _ => Err(BackendError::InvalidResponse),
-        }
+        self.valkey
+            .eval_parsed(RECONCILE_SCRIPT, &keys, &args, |response| {
+                self.telemetry.parse_reconcile_reply(response)
+            })
+            .await
     }
 
     fn enqueue_reconcile(&self, request: ReconcileRequest) -> Result<(), BackendError> {
@@ -1079,7 +1492,7 @@ impl TokenRateLimitStateBackend for ValkeyTokenRateLimitBackend {
     }
 
     fn backend_name(&self) -> &'static str {
-        "valkey"
+        self.valkey.backend_name
     }
 
     fn algorithm_name(&self) -> &'static str {
@@ -1183,8 +1596,8 @@ pub(super) struct ValkeyTokenBucketConfig {
 }
 
 impl ValkeyTokenBucketBackend {
-    /// Build this rule's backend from an already-open, filter-shared
-    /// [`ValkeyEval`] connection.
+    /// Build this rule's backend from a filter-shared [`ValkeyEval`] client and
+    /// lazy connection cache.
     ///
     /// # Errors
     ///
@@ -1314,8 +1727,11 @@ impl TokenRateLimitStateBackend for ValkeyTokenBucketBackend {
             request.estimate.to_string(),
             self.config_fingerprint.clone(),
         ];
-        let response = self.valkey.eval(TOKEN_BUCKET_RESERVE_SCRIPT, &keys, &args).await?;
-        self.telemetry.parse_reserve_reply(&response)
+        self.valkey
+            .eval_parsed(TOKEN_BUCKET_RESERVE_SCRIPT, &keys, &args, |response| {
+                self.telemetry.parse_reserve_reply(response)
+            })
+            .await
     }
 
     async fn reconcile(&self, request: ReconcileRequest) -> Result<BackendSettlement, BackendError> {
@@ -1329,23 +1745,11 @@ impl TokenRateLimitStateBackend for ValkeyTokenBucketBackend {
             self.reservation_timeout_ms.to_string(),
             self.config_fingerprint.clone(),
         ];
-        let response = self.valkey.eval(TOKEN_BUCKET_RECONCILE_SCRIPT, &keys, &args).await?;
-        match response.as_slice() {
-            [3] => Err(BackendError::ConfigurationMismatch),
-            [0, remaining, active, keys] => {
-                self.telemetry.record_reply(*remaining, *active, *keys)?;
-                Ok(BackendSettlement::Noop)
-            },
-            [1, actual, refund, overage, remaining, active, keys] => {
-                self.telemetry.record_reply(*remaining, *active, *keys)?;
-                Ok(BackendSettlement::Applied {
-                    actual: u64::try_from(*actual).map_err(|_error| BackendError::InvalidResponse)?,
-                    refund: u64::try_from(*refund).map_err(|_error| BackendError::InvalidResponse)?,
-                    overage: u64::try_from(*overage).map_err(|_error| BackendError::InvalidResponse)?,
-                })
-            },
-            _ => Err(BackendError::InvalidResponse),
-        }
+        self.valkey
+            .eval_parsed(TOKEN_BUCKET_RECONCILE_SCRIPT, &keys, &args, |response| {
+                self.telemetry.parse_reconcile_reply(response)
+            })
+            .await
     }
 
     fn enqueue_reconcile(&self, request: ReconcileRequest) -> Result<(), BackendError> {
@@ -1362,7 +1766,7 @@ impl TokenRateLimitStateBackend for ValkeyTokenBucketBackend {
     }
 
     fn backend_name(&self) -> &'static str {
-        "valkey"
+        self.valkey.backend_name
     }
 
     fn algorithm_name(&self) -> &'static str {
@@ -1714,12 +2118,44 @@ mod tests {
         );
     }
 
-    /// [`map_valkey_error`] must tag its message with which phase
-    /// (`"connection"` vs. `"command"`) the underlying [`redis::RedisError`]
-    /// came from -- `redis`'s own error text alone doesn't say (e.g. a
-    /// response-timeout's `Display` is a bare `"timed out"`), and that
-    /// distinction is the only thing this crate's own wrapping around
-    /// `redis`'s errors adds.
+    #[tokio::test]
+    async fn live_valkey_malformed_reply_invalidates_only_the_observed_generation() {
+        let Ok(url) = std::env::var("TOKEN_RATE_LIMIT_VALKEY_URL") else {
+            tracing::warn!("skipping: TOKEN_RATE_LIMIT_VALKEY_URL not set");
+            return;
+        };
+        let valkey = ValkeyEval::new(url).unwrap();
+
+        let malformed = valkey
+            .eval_parsed("return {99}", &["malformed".to_owned()], &[], |_response| {
+                Err::<(), _>(BackendError::InvalidResponse)
+            })
+            .await;
+        assert!(matches!(malformed, Err(BackendError::InvalidResponse)));
+        {
+            let cache = valkey.connection.lock().await;
+            assert!(
+                cache.current.is_none(),
+                "a malformed successful reply must invalidate its connection"
+            );
+            assert_eq!(cache.next_generation, 1);
+            drop(cache);
+        }
+
+        let replacement = valkey.acquired_connection().await.unwrap();
+        assert_eq!(replacement.generation, 1);
+        valkey.invalidate(0).await;
+        let cache = valkey.connection.lock().await;
+        assert_eq!(
+            cache.current.as_ref().map(|cached| cached.generation),
+            Some(1),
+            "a late failure from an older generation must not evict its replacement"
+        );
+        drop(cache);
+    }
+
+    /// [`map_valkey_error`] distinguishes a known-not-dispatched connection
+    /// failure from an ambiguous command failure.
     #[test]
     fn map_valkey_error_tags_the_message_with_which_phase_failed() {
         let timed_out = redis::RedisError::from(std::io::Error::from(std::io::ErrorKind::TimedOut));
@@ -1727,12 +2163,31 @@ mod tests {
         let BackendError::Unavailable(message) = map_valkey_error("connection", &timed_out) else {
             panic!("map_valkey_error must always return BackendError::Unavailable")
         };
-        assert_eq!(message, "Valkey connection: timed out");
+        assert_eq!(message, "Redis/Valkey connection: timed out");
 
-        let BackendError::Unavailable(message) = map_valkey_error("command", &timed_out) else {
-            panic!("map_valkey_error must always return BackendError::Unavailable")
+        let BackendError::Unconfirmed(message) = map_valkey_error("command", &timed_out) else {
+            panic!("a command timeout must be classified as unconfirmed")
         };
-        assert_eq!(message, "Valkey command: timed out");
+        assert_eq!(message, "Redis/Valkey command: timed out");
+    }
+
+    #[test]
+    fn explicit_pre_execution_server_rejections_are_bypassed_not_unconfirmed() {
+        for code in ["NOREPLICAS", "READONLY", "MASTERDOWN"] {
+            let error = redis::make_extension_error(code.to_owned(), Some("test rejection".to_owned()));
+            assert!(command_known_not_applied(&error), "{code} must prove no mutation ran");
+            assert!(matches!(
+                map_valkey_error("command", &error),
+                BackendError::Unavailable(_)
+            ));
+        }
+
+        let script_error = redis::make_extension_error("ERR".to_owned(), Some("script failed".to_owned()));
+        assert!(!command_known_not_applied(&script_error));
+        assert!(matches!(
+            map_valkey_error("command", &script_error),
+            BackendError::Unconfirmed(_)
+        ));
     }
 
     /// A one-shot TCP proxy in front of `upstream`'s `host:port`, for
@@ -1807,7 +2262,8 @@ mod tests {
         );
     }
 
-    /// [`ValkeyEval::eval`] must fail closed at (roughly) [`VALKEY_TIMEOUT`]
+    /// [`ValkeyEval::eval`] must fail closed at (roughly)
+    /// [`DEFAULT_OPERATION_TIMEOUT`]
     /// on a command Valkey accepts but never replies to, not hang
     /// indefinitely -- proving [`ValkeyEval::connection_config`] (not
     /// just `redis`'s own, possibly-different, default) is what's
@@ -1815,6 +2271,10 @@ mod tests {
     /// Valkey/Redis (see `TOKEN_RATE_LIMIT_VALKEY_URL` in `tests.rs`);
     /// skips otherwise.
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the fault-injection lifecycle proves timeout, exact-once dispatch, invalidation, and recovery together"
+    )]
     async fn eval_times_out_and_invalidates_the_connection_when_wedged() {
         let Ok(url) = std::env::var("TOKEN_RATE_LIMIT_VALKEY_URL") else {
             tracing::warn!("skipping: TOKEN_RATE_LIMIT_VALKEY_URL not set");
@@ -1829,19 +2289,43 @@ mod tests {
             "sanity check: a trivial script must succeed through an unwedged proxy"
         );
 
+        let mutation_key = format!("praxis:test:no-replay:{}", std::process::id());
+        let direct = redis::Client::open(url.clone()).unwrap();
+        let mut direct_connection = direct.get_multiplexed_async_connection().await.unwrap();
+        redis::cmd("DEL")
+            .arg(&mutation_key)
+            .query_async::<i64>(&mut direct_connection)
+            .await
+            .unwrap();
+
         wedged.store(true, Ordering::SeqCst);
-        let started = std::time::Instant::now();
-        let result = valkey.eval("return {1}", &["k".to_owned()], &[]).await;
+        let started = Instant::now();
+        let result = valkey
+            .eval(
+                "redis.call('INCR', KEYS[1]); return {1}",
+                std::array::from_ref(&mutation_key),
+                &[],
+            )
+            .await;
         let elapsed = started.elapsed();
 
         assert!(
-            matches!(&result, Err(BackendError::Unavailable(message)) if message.starts_with("Valkey command:")),
+            matches!(&result, Err(BackendError::Unconfirmed(message)) if message.starts_with("Redis/Valkey command:")),
             "a wedged command must fail closed with a command-phase error, not hang or panic: {result:?}"
         );
         assert!(
-            elapsed < VALKEY_TIMEOUT * 3,
-            "must fail closed at ~VALKEY_TIMEOUT ({VALKEY_TIMEOUT:?}), not wait indefinitely \
+            elapsed < DEFAULT_OPERATION_TIMEOUT * 3,
+            "must fail closed at ~DEFAULT_OPERATION_TIMEOUT ({DEFAULT_OPERATION_TIMEOUT:?}), not wait indefinitely \
              for the wedge to clear: took {elapsed:?}"
+        );
+        let mutation_count: i64 = redis::cmd("GET")
+            .arg(&mutation_key)
+            .query_async(&mut direct_connection)
+            .await
+            .unwrap();
+        assert_eq!(
+            mutation_count, 1,
+            "an ambiguously completed mutation must be dispatched exactly once"
         );
 
         // Unwedge and confirm the connection was invalidated, not left
@@ -1852,6 +2336,17 @@ mod tests {
             valkey.eval("return {1}", &["k".to_owned()], &[]).await.is_ok(),
             "eval must recover on the next call after invalidating a timed-out connection"
         );
+        let mutation_count: i64 = redis::cmd("GET")
+            .arg(&mutation_key)
+            .query_async(&mut direct_connection)
+            .await
+            .unwrap();
+        assert_eq!(mutation_count, 1, "rediscovery must not replay the prior mutation");
+        redis::cmd("DEL")
+            .arg(&mutation_key)
+            .query_async::<i64>(&mut direct_connection)
+            .await
+            .unwrap();
     }
 
     /// Proves the actual mechanism the filter-level (not per-rule)
@@ -1867,6 +2362,270 @@ mod tests {
             "a ValkeyEval clone (as handed to every Valkey-backed rule) must share one cached \
              connection, not each hold its own independent cache"
         );
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one concurrency test proves the shared deadline, error class, and empty cache state"
+    )]
+    async fn sentinel_discovery_is_bounded_by_one_overall_deadline() {
+        let valkey = ValkeyEval::sentinel(
+            vec!["redis://127.0.0.1:1/".to_owned(), "redis://127.0.0.1:2/".to_owned()],
+            "unreachable-test-primary".to_owned(),
+            ValkeyTimeouts {
+                connect: Duration::from_millis(50),
+                operation: Duration::from_millis(50),
+                discovery: Duration::from_millis(150),
+            },
+            "valkey",
+        )
+        .unwrap();
+
+        let started = Instant::now();
+        let mut tasks = Vec::new();
+        for index in 0..8 {
+            let valkey = valkey.clone();
+            tasks.push(tokio::spawn(async move {
+                valkey.eval("return {1}", &[format!("k-{index}")], &[]).await
+            }));
+        }
+        for task in tasks {
+            assert!(matches!(task.await.unwrap(), Err(BackendError::Unavailable(_))));
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "concurrent callers must share rather than multiply the configured discovery deadline, took {elapsed:?}"
+        );
+        let cache = valkey.connection.lock().await;
+        assert!(cache.current.is_none());
+        assert_eq!(
+            cache.next_generation, 0,
+            "a failed discovery must not install a generation"
+        );
+        drop(cache);
+    }
+
+    fn live_sentinel_settings() -> Option<(Vec<String>, String, Vec<String>)> {
+        let required = std::env::var("TOKEN_RATE_LIMIT_SENTINEL_REQUIRED").is_ok_and(|value| value == "1");
+        let parse_list = |name: &str| {
+            std::env::var(name).ok().map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+        };
+        let settings = match (
+            parse_list("TOKEN_RATE_LIMIT_SENTINEL_URLS"),
+            std::env::var("TOKEN_RATE_LIMIT_SENTINEL_SERVICE").ok(),
+            parse_list("TOKEN_RATE_LIMIT_SENTINEL_NODES"),
+        ) {
+            (Some(endpoints), Some(service_name), Some(nodes)) if endpoints.len() == 3 && nodes.len() == 2 => {
+                Some((endpoints, service_name, nodes))
+            },
+            _ => None,
+        };
+        assert!(
+            !required || settings.is_some(),
+            "live Sentinel qualification was required but its topology environment is missing or invalid"
+        );
+        settings
+    }
+
+    async fn live_node_identity(url: &str) -> Option<(String, String, String)> {
+        let client = redis::Client::open(url).ok()?;
+        let mut connection = client.get_multiplexed_async_connection().await.ok()?;
+        let server: String = redis::cmd("INFO")
+            .arg("SERVER")
+            .query_async(&mut connection)
+            .await
+            .ok()?;
+        let replication: String = redis::cmd("INFO")
+            .arg("REPLICATION")
+            .query_async(&mut connection)
+            .await
+            .ok()?;
+        let field = |info: &str, name: &str| {
+            info.lines()
+                .filter_map(|line| line.trim_end().split_once(':'))
+                .find_map(|(key, value)| (key == name).then(|| value.to_owned()))
+        };
+        Some((
+            field(&server, "run_id")?,
+            field(&replication, "role")?,
+            field(&replication, "master_link_status").unwrap_or_default(),
+        ))
+    }
+
+    async fn wait_for_live_sentinel_failover(nodes: &[String], old_primary_run_id: &str) -> (String, String) {
+        let started = Instant::now();
+        loop {
+            let mut promoted = None;
+            let mut connected_replica = false;
+            for node in nodes {
+                if let Some((run_id, role, link)) = live_node_identity(node).await {
+                    if role == "master" && run_id != old_primary_run_id {
+                        promoted = Some((node.clone(), run_id));
+                    } else if matches!(role.as_str(), "slave" | "replica") && link == "up" {
+                        connected_replica = true;
+                    }
+                }
+            }
+            if let Some(promoted) = promoted
+                && connected_replica
+            {
+                return promoted;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "Sentinel topology did not converge before the test deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Live, product-neutral Sentinel contract. CI runs this unchanged against
+    /// both exact Redis and Red Hat Valkey pins. It proves unavailable-endpoint
+    /// traversal, coalesced discovery, cached steady state, replica-caught-up
+    /// state survival, stale-primary invalidation, bounded rediscovery, and no
+    /// automatic replay of the failed post-promotion mutation.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one live topology lifecycle proves discovery, caching, failover, state survival, and no replay"
+    )]
+    async fn live_sentinel_discovers_coalesces_and_recovers_without_mutation_replay() {
+        let Some((mut endpoints, service_name, nodes)) = live_sentinel_settings() else {
+            tracing::warn!(
+                "skipping: TOKEN_RATE_LIMIT_SENTINEL_URLS, TOKEN_RATE_LIMIT_SENTINEL_SERVICE, and TOKEN_RATE_LIMIT_SENTINEL_NODES not set"
+            );
+            return;
+        };
+        endpoints.insert(0, "redis://127.0.0.1:1/".to_owned());
+        let valkey = ValkeyEval::sentinel(
+            endpoints.clone(),
+            service_name.clone(),
+            ValkeyTimeouts {
+                connect: Duration::from_millis(500),
+                operation: Duration::from_millis(500),
+                discovery: Duration::from_secs(5),
+            },
+            "valkey",
+        )
+        .unwrap();
+
+        let mut tasks = Vec::new();
+        for index in 0..16 {
+            let valkey = valkey.clone();
+            tasks.push(tokio::spawn(async move {
+                valkey.eval("return {1}", &[format!("coalesced-{index}")], &[]).await
+            }));
+        }
+        for task in tasks {
+            assert_eq!(task.await.unwrap().unwrap(), [1]);
+        }
+        {
+            let cache = valkey.connection.lock().await;
+            assert_eq!(
+                cache.next_generation, 1,
+                "concurrent discovery must install one connection"
+            );
+            assert!(cache.current.is_some());
+            drop(cache);
+        }
+
+        let mut old_primary = None;
+        for node in &nodes {
+            if let Some((run_id, role, _)) = live_node_identity(node).await
+                && role == "master"
+            {
+                old_primary = Some((node.clone(), run_id));
+                break;
+            }
+        }
+        let (old_primary_url, old_primary_run_id) = old_primary.expect("test topology must expose one primary");
+        let mutation_key = format!("praxis:test:sentinel:no-replay:{}", std::process::id());
+        assert_eq!(
+            valkey
+                .eval(
+                    "local value = redis.call('INCR', KEYS[1]); return {value}",
+                    std::array::from_ref(&mutation_key),
+                    &[],
+                )
+                .await
+                .unwrap(),
+            [1]
+        );
+
+        let old_primary = redis::Client::open(old_primary_url.clone()).unwrap();
+        let mut old_primary_connection = old_primary.get_multiplexed_async_connection().await.unwrap();
+        let replicas: i64 = redis::cmd("WAIT")
+            .arg(1)
+            .arg(5_000)
+            .query_async(&mut old_primary_connection)
+            .await
+            .unwrap();
+        assert_eq!(replicas, 1, "test-only acknowledgement must verify replica catch-up");
+
+        let sentinel =
+            redis::Client::open(endpoints.get(1).expect("two validated Sentinel endpoints").clone()).unwrap();
+        let mut sentinel_connection = sentinel.get_multiplexed_async_connection().await.unwrap();
+        let reply: String = redis::cmd("SENTINEL")
+            .arg("FAILOVER")
+            .arg(&service_name)
+            .query_async(&mut sentinel_connection)
+            .await
+            .unwrap();
+        assert_eq!(reply, "OK");
+        let (new_primary_url, _new_primary_run_id) = wait_for_live_sentinel_failover(&nodes, &old_primary_run_id).await;
+
+        let stale = valkey
+            .eval(
+                "local value = redis.call('INCR', KEYS[1]); return {value}",
+                std::array::from_ref(&mutation_key),
+                &[],
+            )
+            .await;
+        assert!(stale.is_err(), "a cached connection to the demoted primary must fail");
+
+        let new_primary = redis::Client::open(new_primary_url).unwrap();
+        let mut new_primary_connection = new_primary.get_multiplexed_async_connection().await.unwrap();
+        let value: i64 = redis::cmd("GET")
+            .arg(&mutation_key)
+            .query_async(&mut new_primary_connection)
+            .await
+            .unwrap();
+        assert_eq!(value, 1, "the failed stale-primary mutation must not be replayed");
+
+        assert_eq!(
+            valkey
+                .eval(
+                    "local value = redis.call('INCR', KEYS[1]); return {value}",
+                    std::array::from_ref(&mutation_key),
+                    &[],
+                )
+                .await
+                .unwrap(),
+            [2],
+            "the next operation must rediscover and use the promoted primary"
+        );
+        {
+            let cache = valkey.connection.lock().await;
+            assert_eq!(
+                cache.next_generation, 2,
+                "one failover must cause one coalesced rediscovery"
+            );
+            drop(cache);
+        }
+        redis::cmd("DEL")
+            .arg(&mutation_key)
+            .query_async::<i64>(&mut new_primary_connection)
+            .await
+            .unwrap();
     }
 
     #[test]
@@ -3204,10 +3963,23 @@ mod tests {
         assert!(worker.enqueue(request).is_err());
     }
 
+    /// Failure returned by [`AlwaysFailsReconcile`].
+    #[derive(Clone, Copy)]
+    enum ReconcileFailure {
+        /// Safe to retry because no mutation was dispatched.
+        Unavailable,
+        /// Unsafe to retry because the mutation may have committed.
+        Unconfirmed,
+        /// Unsafe to retry because a successful reply was malformed after the
+        /// mutation may have committed.
+        InvalidResponse,
+    }
+
     /// A backend whose `reconcile` always fails, to drive
-    /// [`run_reconcile_worker`]'s bounded-retry-then-abandon path.
+    /// [`run_reconcile_worker`]'s retry classification.
     struct AlwaysFailsReconcile {
         attempts: Arc<AtomicUsize>,
+        failure: ReconcileFailure,
     }
 
     #[async_trait]
@@ -3218,7 +3990,11 @@ mod tests {
 
         async fn reconcile(&self, _request: ReconcileRequest) -> Result<BackendSettlement, BackendError> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
-            Err(BackendError::Unavailable("simulated failure".into()))
+            Err(match self.failure {
+                ReconcileFailure::Unavailable => BackendError::Unavailable("simulated failure".into()),
+                ReconcileFailure::Unconfirmed => BackendError::Unconfirmed("simulated failure".into()),
+                ReconcileFailure::InvalidResponse => BackendError::InvalidResponse,
+            })
         }
 
         fn enqueue_reconcile(&self, _request: ReconcileRequest) -> Result<(), BackendError> {
@@ -3249,6 +4025,7 @@ mod tests {
         tokio::spawn(run_reconcile_worker(
             AlwaysFailsReconcile {
                 attempts: Arc::clone(&attempts),
+                failure: ReconcileFailure::Unavailable,
             },
             rx,
         ));
@@ -3270,5 +4047,37 @@ mod tests {
             3,
             "must retry exactly twice, then abandon"
         );
+    }
+
+    #[tokio::test]
+    async fn reconcile_worker_never_replays_an_ambiguous_or_malformed_mutation() {
+        for failure in [ReconcileFailure::Unconfirmed, ReconcileFailure::InvalidResponse] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let (tx, rx) = mpsc::channel(1);
+            tokio::spawn(run_reconcile_worker(
+                AlwaysFailsReconcile {
+                    attempts: Arc::clone(&attempts),
+                    failure,
+                },
+                rx,
+            ));
+            tx.send(ReconcileRequest {
+                key: "a".into(),
+                reservation_id: 1,
+                actual: Some(1),
+                estimate: 1,
+                now_ms: 0,
+            })
+            .await
+            .unwrap();
+            drop(tx);
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                attempts.load(Ordering::SeqCst),
+                1,
+                "an ambiguously dispatched reconciliation must never be replayed"
+            );
+        }
     }
 }

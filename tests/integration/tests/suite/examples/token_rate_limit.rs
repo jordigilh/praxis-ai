@@ -18,13 +18,19 @@
 //! instance the same way `filters/src/token_rate_limit/tests.rs`'s
 //! unit-level Valkey tests are.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    io::{BufRead as _, BufReader, Read as _, Write as _},
+    net::{SocketAddr, TcpStream},
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
 #[cfg(feature = "basic-auth-filter")]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use praxis_test_utils::{
-    Backend, StatefulCapturingBackend, example_config_path, free_port, http_send, json_post, load_example_config,
-    parse_body, parse_header, parse_status, patch_yaml, start_proxy,
+    Backend, StatefulCapturingBackend, StatefulCapturingGuard, example_config_path, free_port, http_send, json_post,
+    load_example_config, parse_body, parse_header, parse_status, patch_yaml, start_proxy,
 };
 
 /// Build a `POST` request carrying extra headers beyond the standard
@@ -84,6 +90,272 @@ fn token_rate_limit_config(
         .replace("reserved_tokens: 500", &format!("reserved_tokens: {reserved_tokens}"));
     let patched = patch_yaml(&yaml, proxy_port, &HashMap::from([("127.0.0.1:3000", backend_port)]));
     praxis_core::config::Config::from_yaml(&patched).expect("config should parse")
+}
+
+fn provider_request_count(backend: &StatefulCapturingGuard) -> usize {
+    backend
+        .requests()
+        .iter()
+        .filter(|request| request.method == "POST")
+        .count()
+}
+
+/// Live Sentinel settings supplied by the dedicated Redis/Valkey matrix job.
+#[derive(Clone)]
+struct SentinelTestEnv {
+    endpoints: Vec<String>,
+    service_name: String,
+    nodes: Vec<String>,
+}
+
+/// Serialize topology-changing tests within the integration-test process.
+fn sentinel_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Read and validate the live topology environment. Local runs may omit it;
+/// CI sets `TOKEN_RATE_LIMIT_SENTINEL_REQUIRED=1` so a missing lane cannot
+/// silently turn into a passing skip.
+fn sentinel_test_env() -> Option<SentinelTestEnv> {
+    let required = std::env::var("TOKEN_RATE_LIMIT_SENTINEL_REQUIRED").is_ok_and(|value| value == "1");
+    let parse_list = |name: &str| {
+        std::env::var(name).ok().map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+    };
+    let settings = match (
+        parse_list("TOKEN_RATE_LIMIT_SENTINEL_URLS"),
+        std::env::var("TOKEN_RATE_LIMIT_SENTINEL_SERVICE").ok(),
+        parse_list("TOKEN_RATE_LIMIT_SENTINEL_NODES"),
+    ) {
+        (Some(endpoints), Some(service_name), Some(nodes)) if endpoints.len() == 3 && nodes.len() == 2 => {
+            Some(SentinelTestEnv {
+                endpoints,
+                service_name,
+                nodes,
+            })
+        },
+        _ => None,
+    };
+    assert!(
+        !required || settings.is_some(),
+        "Sentinel qualification is required but TOKEN_RATE_LIMIT_SENTINEL_URLS, \
+         TOKEN_RATE_LIMIT_SENTINEL_SERVICE, or TOKEN_RATE_LIMIT_SENTINEL_NODES is missing/invalid"
+    );
+    settings
+}
+
+/// Parse the loopback Redis URL shape used by the reproducible live topology.
+fn redis_test_addr(url: &str) -> Result<SocketAddr, String> {
+    let authority = url
+        .strip_prefix("redis://")
+        .ok_or_else(|| format!("test Redis URL must start with redis://: {url}"))?
+        .trim_end_matches('/');
+    authority
+        .parse()
+        .map_err(|error| format!("invalid test Redis address {authority}: {error}"))
+}
+
+/// Issue one RESP2 command over a fresh connection and return a simple,
+/// integer, or bulk-string response. The live tests need no external CLI.
+fn redis_test_command(url: &str, args: &[&str]) -> Result<String, String> {
+    let address = redis_test_addr(url)?;
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))
+        .map_err(|error| format!("connect {address}: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(6)))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(1)))
+        .map_err(|error| error.to_string())?;
+    write!(stream, "*{}\r\n", args.len()).map_err(|error| error.to_string())?;
+    for arg in args {
+        write!(stream, "${}\r\n{}\r\n", arg.len(), arg).map_err(|error| error.to_string())?;
+    }
+    stream.flush().map_err(|error| error.to_string())?;
+
+    let mut reader = BufReader::new(stream);
+    let mut header = String::new();
+    reader.read_line(&mut header).map_err(|error| error.to_string())?;
+    let header = header.trim_end_matches(['\r', '\n']);
+    let Some(prefix) = header.chars().next() else {
+        return Err("empty Redis response".to_owned());
+    };
+    let value = header.get(1..).ok_or_else(|| "invalid Redis response".to_owned())?;
+    match prefix {
+        '+' | ':' => Ok(value.to_owned()),
+        '-' => Err(value.to_owned()),
+        '$' => {
+            let length = value
+                .parse::<isize>()
+                .map_err(|error| format!("invalid bulk length: {error}"))?;
+            if length < 0 {
+                return Ok(String::new());
+            }
+            let length = usize::try_from(length).map_err(|error| error.to_string())?;
+            let mut body = vec![0_u8; length];
+            reader.read_exact(&mut body).map_err(|error| error.to_string())?;
+            String::from_utf8(body).map_err(|error| error.to_string())
+        },
+        _ => Err(format!("unsupported Redis response type: {prefix}")),
+    }
+}
+
+fn redis_info_field(url: &str, section: &str, field: &str) -> Option<String> {
+    let info = redis_test_command(url, &["INFO", section]).ok()?;
+    info.lines()
+        .filter_map(|line| line.trim_end().split_once(':'))
+        .find_map(|(name, value)| (name == field).then(|| value.to_owned()))
+}
+
+fn live_primary_and_replica(env: &SentinelTestEnv) -> Option<(String, String, String)> {
+    let mut primary = None;
+    let mut replica = None;
+    for node in &env.nodes {
+        let role = redis_info_field(node, "REPLICATION", "role")?;
+        if role == "master" {
+            primary = Some(node.clone());
+        } else if matches!(role.as_str(), "slave" | "replica") {
+            replica = Some(node.clone());
+        }
+    }
+    let primary = primary?;
+    let run_id = redis_info_field(&primary, "SERVER", "run_id")?;
+    Some((primary, replica?, run_id))
+}
+
+fn wait_for_new_primary(env: &SentinelTestEnv, old_primary_run_id: &str) -> (String, String) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some((primary, replica, run_id)) = live_primary_and_replica(env)
+            && run_id != old_primary_run_id
+            && redis_info_field(&replica, "REPLICATION", "master_link_status").as_deref() == Some("up")
+        {
+            return (primary, replica);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Sentinel topology did not converge before deadline"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn wait_for_info_field(url: &str, section: &str, field: &str, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if redis_info_field(url, section, field).as_deref() == Some(expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{field} did not become {expected:?} before deadline"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the test config keeps topology, policy, state identity, and deterministic budget inputs explicit"
+)]
+fn sentinel_pipeline_config(
+    proxy_port: u16,
+    backend_port: u16,
+    kind: &str,
+    on_failure: &str,
+    endpoints: &[String],
+    service_name: &str,
+    namespace: &str,
+    capacity: u64,
+    reserved_tokens: u64,
+    discovery_timeout: &str,
+) -> praxis_core::config::Config {
+    let endpoint_lines = endpoints
+        .iter()
+        .map(|endpoint| format!("              - \"{endpoint}\""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let yaml = format!(
+        "listeners:\n\
+         \x20 - name: default\n\
+         \x20   address: \"127.0.0.1:{proxy_port}\"\n\
+         \x20   filter_chains: [main]\n\
+         filter_chains:\n\
+         \x20 - name: main\n\
+         \x20   filters:\n\
+         \x20     - filter: router\n\
+         \x20       routes:\n\
+         \x20         - path_prefix: \"/\"\n\
+         \x20           cluster: backend\n\
+         \x20     - filter: token_rate_limit\n\
+         \x20       backend:\n\
+         \x20         kind: {kind}\n\
+         \x20         sentinel:\n\
+         \x20           endpoints:\n\
+         {endpoint_lines}\n\
+         \x20           service_name: {service_name}\n\
+         \x20         namespace: \"{namespace}\"\n\
+         \x20         on_failure: {on_failure}\n\
+         \x20         connect_timeout: 100ms\n\
+         \x20         operation_timeout: 500ms\n\
+         \x20         discovery_timeout: {discovery_timeout}\n\
+         \x20       rules:\n\
+         \x20         - name: default\n\
+         \x20           match:\n\
+         \x20             headers:\n\
+         \x20               x-trl-sentinel-test: qualified\n\
+         \x20           algorithm: sliding_window\n\
+         \x20           window: 1h\n\
+         \x20           capacity: {capacity}\n\
+         \x20           reserved_tokens: {reserved_tokens}\n\
+         \x20     - filter: access_log\n\
+         \x20     - filter: load_balancer\n\
+         \x20       clusters:\n\
+         \x20         - name: backend\n\
+         \x20           endpoints:\n\
+         \x20             - \"127.0.0.1:{backend_port}\"\n\
+         insecure_options:\n\
+         \x20 allow_private_endpoints: true\n"
+    );
+    praxis_core::config::Config::from_yaml(&yaml).expect("Sentinel pipeline config should parse")
+}
+
+/// Restores the controlled `NOREPLICAS` topology even if the test unwinds.
+struct ReplicationHealthGuard {
+    primary: String,
+    replica: String,
+    active: bool,
+}
+
+impl ReplicationHealthGuard {
+    fn restore(&mut self) -> Result<(), String> {
+        if !self.active {
+            return Ok(());
+        }
+        redis_test_command(&self.primary, &["CONFIG", "SET", "min-replicas-to-write", "0"])?;
+        redis_test_command(&self.primary, &["CONFIG", "SET", "min-replicas-max-lag", "10"])?;
+        let primary = redis_test_addr(&self.primary)?;
+        let host = primary.ip().to_string();
+        let port = primary.port().to_string();
+        redis_test_command(&self.replica, &["REPLICAOF", &host, &port])?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for ReplicationHealthGuard {
+    fn drop(&mut self) {
+        let _result = self.restore();
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -233,6 +505,304 @@ fn example_config_token_rate_limit() {
     let raw = http_send(proxy.addr(), &json_post("/v1/chat/completions", "{}"));
     assert_eq!(parse_status(&raw), 200, "example config smoke test should return 200");
     assert_eq!(parse_body(&raw), PLAIN_TEXT_BODY, "body should pass through unchanged");
+}
+
+/// Load either shipped Sentinel example against the live qualification
+/// topology while keeping its backend selector unchanged.
+fn sentinel_example_config(
+    file_name: &str,
+    proxy_port: u16,
+    backend_port: u16,
+    env: &SentinelTestEnv,
+) -> praxis_core::config::Config {
+    let path = example_config_path(file_name);
+    let mut yaml = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
+    let mut endpoints = env.endpoints.iter();
+    for variable in [
+        "${TOKEN_RATE_LIMIT_SENTINEL_1_URL}",
+        "${TOKEN_RATE_LIMIT_SENTINEL_2_URL}",
+        "${TOKEN_RATE_LIMIT_SENTINEL_3_URL}",
+    ] {
+        let endpoint = endpoints
+            .next()
+            .expect("live qualification requires three Sentinel endpoints");
+        yaml = yaml.replace(variable, endpoint);
+    }
+    let namespace = format!(
+        "praxis-it-{}-{}",
+        file_name.trim_end_matches(".yaml"),
+        std::process::id()
+    );
+    yaml = yaml
+        .replace("service_name: praxis-primary", &format!("service_name: {}", env.service_name))
+        .replace("praxis:token_rate_limit:redis-sentinel:v1", &namespace)
+        .replace("praxis:token_rate_limit:valkey-sentinel:v1", &namespace)
+        .replace("capacity: 100000", "capacity: 100")
+        .replace("reserved_tokens: 500", "reserved_tokens: 100")
+        .replace(
+            "          - name: default\n            algorithm:",
+            "          - name: default\n            match:\n              headers:\n                x-trl-sentinel-test: qualified\n            algorithm:",
+        );
+    let patched = patch_yaml(&yaml, proxy_port, &HashMap::from([("127.0.0.1:3000", backend_port)]));
+    praxis_core::config::Config::from_yaml(&patched).expect("Sentinel example should parse")
+}
+
+fn run_sentinel_example(file_name: &str) {
+    let Some(env) = sentinel_test_env() else {
+        eprintln!("skipping {file_name}: live Sentinel topology is not configured");
+        return;
+    };
+    let _guard = sentinel_test_lock();
+    let backend = StatefulCapturingBackend::new(vec![(200, PLAIN_TEXT_BODY.to_owned())]).start_with_shutdown();
+    let proxy_port = free_port();
+    let config = sentinel_example_config(file_name, proxy_port, backend.port(), &env);
+    let proxy = start_proxy(&config);
+
+    let request = json_post_with_headers("/v1/chat/completions", "{}", &[("x-trl-sentinel-test", "qualified")]);
+    let first = http_send(proxy.addr(), &request);
+    assert_eq!(
+        parse_status(&first),
+        200,
+        "the first Sentinel-backed request should be admitted"
+    );
+    let second = http_send(proxy.addr(), &request);
+    assert_eq!(
+        parse_status(&second),
+        429,
+        "the shared Sentinel-backed budget should be exhausted"
+    );
+    assert_eq!(
+        provider_request_count(&backend),
+        1,
+        "the 429 request must not reach the provider"
+    );
+}
+
+#[test]
+fn example_config_token_rate_limit_redis_sentinel() {
+    run_sentinel_example("token-rate-limit-redis-sentinel.yaml");
+}
+
+#[test]
+fn example_config_token_rate_limit_valkey_sentinel() {
+    run_sentinel_example("token-rate-limit-valkey-sentinel.yaml");
+}
+
+#[test]
+fn sentinel_failure_policy_controls_provider_invocation() {
+    let endpoints = vec!["redis://127.0.0.1:1/".to_owned(), "redis://127.0.0.1:2/".to_owned()];
+    for (kind, policy, expected_status, expected_requests) in [
+        ("redis", "closed", 503, 0),
+        ("valkey", "closed", 503, 0),
+        ("redis", "open", 200, 1),
+        ("valkey", "open", 200, 1),
+    ] {
+        let backend = StatefulCapturingBackend::new(vec![(200, PLAIN_TEXT_BODY.to_owned())]).start_with_shutdown();
+        let proxy_port = free_port();
+        let namespace = format!("praxis-it-sentinel-{kind}-{policy}-{proxy_port}");
+        let config = sentinel_pipeline_config(
+            proxy_port,
+            backend.port(),
+            kind,
+            policy,
+            &endpoints,
+            "unreachable-primary",
+            &namespace,
+            100,
+            10,
+            "150ms",
+        );
+        let proxy = start_proxy(&config);
+        let request = json_post_with_headers("/v1/chat/completions", "{}", &[("x-trl-sentinel-test", "qualified")]);
+        let response = http_send(proxy.addr(), &request);
+        assert_eq!(
+            parse_status(&response),
+            expected_status,
+            "{kind} on_failure={policy} returned the wrong status"
+        );
+        assert_eq!(
+            provider_request_count(&backend),
+            expected_requests,
+            "{kind} on_failure={policy} invoked the provider the wrong number of times"
+        );
+    }
+}
+
+/// Exercises both equivalent selectors through one cached-primary failover.
+/// State is acknowledged to the replica before promotion, then each stale
+/// connection fails once without replay; the following calls rediscover the
+/// primary, admit up to the surviving limit, and return 429 when exhausted.
+#[test]
+fn sentinel_failover_preserves_shared_state_and_post_failover_enforcement() {
+    let Some(env) = sentinel_test_env() else {
+        eprintln!("skipping Sentinel failover integration: live topology is not configured");
+        return;
+    };
+    let _guard = sentinel_test_lock();
+    let (old_primary, _old_replica, old_primary_run_id) =
+        live_primary_and_replica(&env).expect("live topology must expose one primary and one replica");
+    let backend = StatefulCapturingBackend::new(vec![(200, PLAIN_TEXT_BODY.to_owned()); 4]).start_with_shutdown();
+    let namespace = format!("praxis-it-sentinel-failover-{}-{}", std::process::id(), free_port());
+
+    let redis_port = free_port();
+    let redis_config = sentinel_pipeline_config(
+        redis_port,
+        backend.port(),
+        "redis",
+        "closed",
+        &env.endpoints,
+        &env.service_name,
+        &namespace,
+        400,
+        100,
+        "5s",
+    );
+    let redis_proxy = start_proxy(&redis_config);
+    let valkey_port = free_port();
+    let valkey_config = sentinel_pipeline_config(
+        valkey_port,
+        backend.port(),
+        "valkey",
+        "closed",
+        &env.endpoints,
+        &env.service_name,
+        &namespace,
+        400,
+        100,
+        "5s",
+    );
+    let valkey_proxy = start_proxy(&valkey_config);
+    let request = json_post_with_headers("/v1/chat/completions", "{}", &[("x-trl-sentinel-test", "qualified")]);
+
+    for (selector, proxy) in [("redis", &redis_proxy), ("valkey", &valkey_proxy)] {
+        let response = http_send(proxy.addr(), &request);
+        assert_eq!(parse_status(&response), 200, "{selector} should admit before failover");
+    }
+    let replicas = redis_test_command(&old_primary, &["WAIT", "1", "5000"])
+        .expect("test-only acknowledgement should succeed")
+        .parse::<u64>()
+        .expect("WAIT should return an integer");
+    assert_eq!(replicas, 1, "reservation state must reach the replica before failover");
+
+    let sentinel = env.endpoints.first().expect("three Sentinel endpoints are validated");
+    assert_eq!(
+        redis_test_command(sentinel, &["SENTINEL", "FAILOVER", &env.service_name])
+            .expect("planned failover should start"),
+        "OK"
+    );
+    let (_new_primary, _new_replica) = wait_for_new_primary(&env, &old_primary_run_id);
+
+    for (selector, proxy) in [("redis", &redis_proxy), ("valkey", &valkey_proxy)] {
+        let response = http_send(proxy.addr(), &request);
+        assert_eq!(
+            parse_status(&response),
+            503,
+            "{selector} must not replay the mutation sent through its stale cached connection"
+        );
+    }
+    assert_eq!(
+        provider_request_count(&backend),
+        2,
+        "stale-primary failures must not contact the provider"
+    );
+
+    for (selector, proxy) in [("redis", &redis_proxy), ("valkey", &valkey_proxy)] {
+        let admitted = http_send(proxy.addr(), &request);
+        assert_eq!(
+            parse_status(&admitted),
+            200,
+            "{selector} should admit after rediscovery"
+        );
+    }
+    for (selector, proxy) in [("redis", &redis_proxy), ("valkey", &valkey_proxy)] {
+        let denied = http_send(proxy.addr(), &request);
+        assert_eq!(
+            parse_status(&denied),
+            429,
+            "{selector} should observe the surviving exhausted state"
+        );
+    }
+    assert_eq!(
+        provider_request_count(&backend),
+        4,
+        "only four confirmed admissions should reach the provider"
+    );
+}
+
+/// Force the primary's replication-health write gate and verify that the same
+/// `NOREPLICAS` response is 503 in closed mode and one observable provider
+/// invocation in open mode, for the two equivalent selectors.
+#[test]
+fn sentinel_noreplicas_obeys_closed_and_open_failure_policies() {
+    let Some(env) = sentinel_test_env() else {
+        eprintln!("skipping Sentinel NOREPLICAS integration: live topology is not configured");
+        return;
+    };
+    let _guard = sentinel_test_lock();
+    let (primary, replica, _run_id) =
+        live_primary_and_replica(&env).expect("live topology must expose one primary and one replica");
+    redis_test_command(&replica, &["REPLICAOF", "NO", "ONE"]).expect("replica should detach");
+    wait_for_info_field(&primary, "REPLICATION", "connected_slaves", "0");
+    redis_test_command(&primary, &["CONFIG", "SET", "min-replicas-max-lag", "1"])
+        .expect("primary should accept min-replicas-max-lag");
+    redis_test_command(&primary, &["CONFIG", "SET", "min-replicas-to-write", "1"])
+        .expect("primary should accept min-replicas-to-write");
+    let mut restore = ReplicationHealthGuard {
+        primary: primary.clone(),
+        replica: replica.clone(),
+        active: true,
+    };
+
+    let closed_backend = StatefulCapturingBackend::new(vec![(200, PLAIN_TEXT_BODY.to_owned())]).start_with_shutdown();
+    let closed_port = free_port();
+    let closed_config = sentinel_pipeline_config(
+        closed_port,
+        closed_backend.port(),
+        "redis",
+        "closed",
+        &env.endpoints,
+        &env.service_name,
+        &format!("praxis-it-noreplicas-closed-{closed_port}"),
+        100,
+        10,
+        "3s",
+    );
+    let closed_proxy = start_proxy(&closed_config);
+    let request = json_post_with_headers("/v1/chat/completions", "{}", &[("x-trl-sentinel-test", "qualified")]);
+    let closed = http_send(closed_proxy.addr(), &request);
+    assert_eq!(parse_status(&closed), 503, "closed mode must reject NOREPLICAS");
+    assert_eq!(
+        provider_request_count(&closed_backend),
+        0,
+        "closed mode must not invoke the provider"
+    );
+
+    let open_backend = StatefulCapturingBackend::new(vec![(200, PLAIN_TEXT_BODY.to_owned())]).start_with_shutdown();
+    let open_port = free_port();
+    let open_config = sentinel_pipeline_config(
+        open_port,
+        open_backend.port(),
+        "valkey",
+        "open",
+        &env.endpoints,
+        &env.service_name,
+        &format!("praxis-it-noreplicas-open-{open_port}"),
+        100,
+        10,
+        "3s",
+    );
+    let open_proxy = start_proxy(&open_config);
+    let open = http_send(open_proxy.addr(), &request);
+    assert_eq!(parse_status(&open), 200, "open mode must bypass NOREPLICAS");
+    assert_eq!(
+        provider_request_count(&open_backend),
+        1,
+        "open mode must invoke the provider exactly once"
+    );
+
+    restore.restore().expect("replication topology should restore");
+    wait_for_info_field(&replica, "REPLICATION", "master_link_status", "up");
+    wait_for_info_field(&primary, "REPLICATION", "connected_slaves", "1");
 }
 
 /// Smoke-tests the real `token-rate-limit-mixed-algorithms.yaml` example
@@ -684,7 +1254,7 @@ fn authenticated_subject_valkey_backend_isolates_budgets_across_gateway_replicas
         if parse_status(&subject_a_second) == 200 {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(25));
+        std::thread::sleep(Duration::from_millis(25));
     }
     assert_eq!(
         parse_status(&subject_a_second),

@@ -7,7 +7,7 @@ use std::future::Future;
 
 use praxis_filter::{FilterAction, HttpFilter};
 
-use super::TokenRateLimitFilter;
+use super::{META_ENFORCEMENT_STATUS, META_RESERVATION_ID, TokenRateLimitFilter};
 use crate::token_usage::{
     META_TOKEN_CACHE_READ, META_TOKEN_CACHE_WRITE, META_TOKEN_INPUT, META_TOKEN_OUTPUT, META_TOKEN_REASONING,
     META_TOKEN_STATUS, META_TOKEN_TOTAL, TOKEN_STATUS_OVERFLOW,
@@ -621,7 +621,10 @@ fn from_config_rejects_valkey_backend_without_url() {
         "algorithm: sliding_window\nwindow: 1h\ncapacity: 100\nreserved_tokens: 5",
     );
     let err = TokenRateLimitFilter::from_config(&yaml).err().expect("should error");
-    assert!(err.to_string().contains("backend.url is required"), "got: {err}");
+    assert!(
+        err.to_string().contains("backend.url or backend.sentinel is required"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -631,6 +634,120 @@ fn from_config_accepts_valkey_backend_with_url() {
         "algorithm: sliding_window\nwindow: 1h\ncapacity: 100\nreserved_tokens: 5",
     );
     assert!(TokenRateLimitFilter::from_config(&yaml).is_ok());
+}
+
+#[test]
+fn from_config_accepts_redis_as_an_equivalent_shared_backend_selector() {
+    let yaml = single_rule_yaml_with(
+        "backend:\n  kind: redis\n  url: redis://127.0.0.1:6399",
+        "algorithm: sliding_window\nwindow: 1h\ncapacity: 100\nreserved_tokens: 5",
+    );
+    assert!(TokenRateLimitFilter::from_config(&yaml).is_ok());
+}
+
+#[test]
+fn from_config_accepts_equivalent_redis_and_valkey_sentinel_topologies() {
+    for kind in ["redis", "valkey"] {
+        let yaml = single_rule_yaml_with(
+            &format!(
+                "backend:\n\
+                 \x20 kind: {kind}\n\
+                 \x20 sentinel:\n\
+                 \x20   endpoints:\n\
+                 \x20     - redis://127.0.0.1:26379\n\
+                 \x20     - redis://127.0.0.1:26380\n\
+                 \x20   service_name: praxis-primary\n\
+                 \x20 connect_timeout: 250ms\n\
+                 \x20 operation_timeout: 400ms\n\
+                 \x20 discovery_timeout: 2s\n\
+                 \x20 on_failure: open"
+            ),
+            "algorithm: sliding_window\nwindow: 1h\ncapacity: 100\nreserved_tokens: 5",
+        );
+        assert!(
+            TokenRateLimitFilter::from_config(&yaml).is_ok(),
+            "{kind} must accept the common Sentinel schema"
+        );
+    }
+}
+
+#[test]
+fn from_config_rejects_contradictory_standalone_and_sentinel_topologies() {
+    let yaml = single_rule_yaml_with(
+        "backend:\n\
+         \x20 kind: redis\n\
+         \x20 url: redis://127.0.0.1:6379\n\
+         \x20 sentinel:\n\
+         \x20   endpoints: [redis://127.0.0.1:26379, redis://127.0.0.1:26380]\n\
+         \x20   service_name: praxis-primary",
+        "algorithm: sliding_window\nwindow: 1h\ncapacity: 100\nreserved_tokens: 5",
+    );
+    let err = TokenRateLimitFilter::from_config(&yaml).err().expect("should error");
+    assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
+}
+
+#[test]
+fn from_config_rejects_incomplete_or_duplicate_sentinel_settings() {
+    let algorithm = "algorithm: sliding_window\nwindow: 1h\ncapacity: 100\nreserved_tokens: 5";
+    for (backend, expected) in [
+        (
+            "backend:\n  kind: redis\n  sentinel:\n    endpoints: [redis://127.0.0.1:26379]\n    service_name: primary",
+            "at least two",
+        ),
+        (
+            "backend:\n  kind: redis\n  sentinel:\n    endpoints: [redis://127.0.0.1:26379, redis://127.0.0.1:26379]\n    service_name: primary",
+            "must be distinct",
+        ),
+        (
+            "backend:\n  kind: redis\n  sentinel:\n    endpoints: [redis://127.0.0.1:26379, redis://127.0.0.1:26379/]\n    service_name: primary",
+            "must be distinct",
+        ),
+        (
+            "backend:\n  kind: redis\n  sentinel:\n    endpoints: [redis://127.0.0.1:26379, redis://127.0.0.1:26380]\n    service_name: '   '",
+            "service_name must not be empty",
+        ),
+    ] {
+        let yaml = single_rule_yaml_with(backend, algorithm);
+        let err = TokenRateLimitFilter::from_config(&yaml).err().expect("should error");
+        assert!(err.to_string().contains(expected), "expected {expected:?}, got: {err}");
+    }
+}
+
+#[test]
+fn from_config_rejects_zero_or_topology_incompatible_backend_timeouts() {
+    let algorithm = "algorithm: sliding_window\nwindow: 1h\ncapacity: 100\nreserved_tokens: 5";
+    for (backend, expected) in [
+        (
+            "backend:\n  kind: redis\n  url: redis://127.0.0.1:6379\n  connect_timeout: 0ms",
+            "duration must be positive",
+        ),
+        (
+            "backend:\n  kind: redis\n  url: redis://127.0.0.1:6379\n  operation_timeout: 0s",
+            "duration must be positive",
+        ),
+        (
+            "backend:\n  kind: redis\n  url: redis://127.0.0.1:6379\n  discovery_timeout: 1s",
+            "only valid with backend.sentinel",
+        ),
+        (
+            "backend:\n  kind: redis\n  sentinel:\n    endpoints: [redis://127.0.0.1:26379, redis://127.0.0.1:26380]\n    service_name: primary\n  connect_timeout: 2s\n  discovery_timeout: 1s",
+            "must not exceed",
+        ),
+    ] {
+        let yaml = single_rule_yaml_with(backend, algorithm);
+        let err = TokenRateLimitFilter::from_config(&yaml).err().expect("should error");
+        assert!(err.to_string().contains(expected), "expected {expected:?}, got: {err}");
+    }
+}
+
+#[test]
+fn from_config_rejects_shared_backend_settings_for_memory() {
+    let yaml = single_rule_yaml_with(
+        "backend:\n  kind: memory\n  on_failure: open",
+        "algorithm: sliding_window\nwindow: 1h\ncapacity: 100\nreserved_tokens: 5",
+    );
+    let err = TokenRateLimitFilter::from_config(&yaml).err().expect("should error");
+    assert!(err.to_string().contains("incompatible"), "got: {err}");
 }
 
 #[test]
@@ -1711,6 +1828,44 @@ async fn valkey_failure_fails_closed() {
             assert_eq!(rejection.status, 503, "unreachable backend should fail closed with 503");
         },
         other => panic!("unreachable Valkey backend must not admit the request, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn shared_backend_open_policy_bypasses_an_unreachable_backend_without_reconciliation() {
+    for (kind, algorithm) in [
+        (
+            "redis",
+            "algorithm: sliding_window\nwindow: 1h\ncapacity: 100\nreserved_tokens: 10",
+        ),
+        (
+            "valkey",
+            "algorithm: token_bucket\ncapacity: 100\nrefill_rate: 1\nreserved_tokens: 10",
+        ),
+    ] {
+        let yaml = single_rule_yaml_with(
+            &format!(
+                "backend:\n  kind: {kind}\n  url: redis://127.0.0.1:1\n  on_failure: open\n  connect_timeout: 50ms\n  operation_timeout: 50ms"
+            ),
+            algorithm,
+        );
+        let filter = TokenRateLimitFilter::from_config(&yaml).unwrap();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        assert!(matches!(
+            filter.on_request(&mut ctx).await.unwrap(),
+            FilterAction::Continue
+        ));
+        assert_eq!(ctx.get_metadata(META_ENFORCEMENT_STATUS), Some("bypassed"));
+        assert!(ctx.get_metadata(META_RESERVATION_ID).is_none());
+
+        let mut body = None;
+        assert!(matches!(
+            filter.on_response_body(&mut ctx, &mut body, true).unwrap(),
+            FilterAction::Continue
+        ));
+        assert!(ctx.get_metadata(META_ENFORCEMENT_STATUS).is_none());
     }
 }
 
@@ -3812,6 +3967,16 @@ async fn accounting_records_describe_admissions_denials_and_settlements_with_bou
 
     admit_deny_and_settle(filter.as_ref()).await;
 
+    for record in capture.events() {
+        assert!(
+            !record.fields.contains_key("key"),
+            "logs must not expose the resolved bucket key"
+        );
+        assert!(
+            !record.fields.contains_key("subject"),
+            "logs must not expose an authenticated subject"
+        );
+    }
     let records = accounting_records(&capture);
     let [admission, denial, settlement] = records.as_slice() else {
         panic!("expected one admission, one denial, and one settlement record, got {records:?}");
@@ -3838,6 +4003,40 @@ async fn accounting_records_describe_admissions_denials_and_settlements_with_bou
     assert_eq!(field(settlement, "actual"), Some("40"));
     assert_eq!(field(settlement, "refund"), Some("20"));
     assert_eq!(field(settlement, "overage"), Some("0"));
+}
+
+#[test]
+fn configuration_mismatch_emits_one_bounded_fail_closed_accounting_record() {
+    let capture = TracingCapture::default();
+    let _guard = capture.install();
+    super::record_accounting_failure(
+        "default",
+        "sliding_window",
+        "redis",
+        "reserve",
+        &super::backend::BackendError::ConfigurationMismatch,
+    );
+
+    let records = accounting_records(&capture);
+    let [record] = records.as_slice() else {
+        panic!("expected exactly one configuration-mismatch record, got {records:?}");
+    };
+    assert_eq!(record.level, tracing::Level::WARN);
+    assert_eq!(field(record, "phase"), Some("reserve"));
+    assert_eq!(field(record, "rule"), Some("default"));
+    assert_eq!(field(record, "algorithm"), Some("sliding_window"));
+    assert_eq!(field(record, "backend"), Some("redis"));
+    assert_eq!(field(record, "result"), Some("failed"));
+    assert_eq!(field(record, "error"), Some("configuration_mismatch"));
+    for name in record.fields.keys() {
+        assert!(ACCOUNTING_FIELDS.contains(name), "unexpected accounting field {name}");
+    }
+    for sensitive in ["key", "subject", "endpoint"] {
+        assert!(
+            !record.fields.contains_key(sensitive),
+            "configuration-mismatch logs must not expose {sensitive}"
+        );
+    }
 }
 
 #[tokio::test]

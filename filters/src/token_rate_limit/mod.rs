@@ -7,8 +7,8 @@
 //! feature, which is off by default and activates the `experimental`
 //! marker. This filter delivers the epic's agreed M1/M2/M6/M7 scope (see
 //! below), but its parent proposal (`00121_token-rate-limiting.md`) is
-//! not yet `accepted`, and open questions remain: HA/clustered-Valkey
-//! failure modes, and this filter's relationship to Kuadrant's
+//! not yet `accepted`, and open questions remain: native Redis/Valkey
+//! Cluster, and this filter's relationship to Kuadrant's
 //! `TokenRateLimitPolicy` (a separate, already-shipped mechanism for
 //! the same problem -- see `ai#127`). The configuration surface may
 //! change between releases. Anything beyond the agreed M1/M2/M6/M7 scope
@@ -33,10 +33,14 @@
 //!   reserve/reconcile split this filter needs.
 //!
 //! Both sit behind the same pluggable [`backend`] trait, so either
-//! algorithm runs in-process (default) or against a shared Valkey
-//! backend (`backend: {kind: valkey}`) for state shared across gateway
+//! algorithm runs in-process (default) or against an equivalent shared
+//! Redis/Valkey backend (`backend: {kind: redis}` or `kind: valkey`) for
+//! state shared across gateway
 //! instances/replicas -- see `praxis-proxy/grid#83` for the fuller
 //! Valkey-backend spec this milestone is a narrower slice of.
+//! Shared backends can use one standalone URL or a Sentinel topology. Sentinel
+//! discovery is cached off the healthy request path; dispatched reservations
+//! are never blindly replayed after an ambiguous timeout or disconnect.
 //!
 //! Per-rule algorithm choice, rather than one fixed algorithm for the
 //! whole filter, mirrors the `GuardrailsFilter`'s own `rules: Vec<RuleConfig>`
@@ -109,7 +113,7 @@ mod weights;
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -120,17 +124,19 @@ use praxis_filter::{
     AuthenticatedIdentity, BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection,
     TrustedHeaderMutation, parse_filter_config,
 };
+use redis::IntoConnectionInfo as _;
 
 use self::{
     backend::{
-        BackendError, BackendReserve, BackendSettlement, CleanupReport, InMemoryTokenBucketBackend,
+        AdmissionFailureOutcome, BackendError, BackendReserve, BackendSettlement, CleanupReport,
+        DEFAULT_CONNECT_TIMEOUT, DEFAULT_DISCOVERY_TIMEOUT, DEFAULT_OPERATION_TIMEOUT, InMemoryTokenBucketBackend,
         InMemoryTokenRateLimitBackend, ReconcileRequest, ReserveRequest, TokenRateLimitStateBackend,
-        ValkeyBackendConfig, ValkeyEval, ValkeyTokenBucketBackend, ValkeyTokenBucketConfig,
+        ValkeyBackendConfig, ValkeyEval, ValkeyTimeouts, ValkeyTokenBucketBackend, ValkeyTokenBucketConfig,
         ValkeyTokenRateLimitBackend,
     },
     config::{
-        ActionType, BackendConfig, BackendKind, DEFAULT_RESERVATION_TIMEOUT, EstimationConfig, EstimationStrategy,
-        MatchConfig, RuleAlgorithm, RuleConfig, TierConfig, TokenRateLimitConfig,
+        ActionType, BackendConfig, BackendKind, BackendOnFailure, DEFAULT_RESERVATION_TIMEOUT, EstimationConfig,
+        EstimationStrategy, MatchConfig, RuleAlgorithm, RuleConfig, SentinelConfig, TierConfig, TokenRateLimitConfig,
     },
     keys::{CompiledKeySpec, KeyDecision, KeyInputs, compile_key_spec},
     ledger::{Budget, DenialReason, Ledger, LedgerConfig},
@@ -160,6 +166,10 @@ const META_RULE_INDEX: &str = "token_rate_limit.rule_index";
 /// reconciliation can use the actual per-request estimate (not just
 /// the compiled default) for its settlement math.
 const META_ESTIMATE: &str = "token_rate_limit.estimate";
+
+/// Metadata recording an open-mode admission that continued without a
+/// confirmed reservation. Values are `bypassed` or `unconfirmed`.
+const META_ENFORCEMENT_STATUS: &str = "token_rate_limit.enforcement_status";
 
 /// The budget key used by the backward-compatible global key mode.
 pub(super) const FALLBACK_KEY: &str = "__fallback__";
@@ -216,7 +226,7 @@ const HEADER_RATELIMIT_RESET: &str = "X-RateLimit-Reset-Tokens";
 
 /// Resolved, ready-to-use form of the filter-level `backend:` config:
 /// either every rule uses in-process state, or every rule shares one
-/// already-open Valkey connection (see [`ValkeyEval`]'s doc comment for
+/// lazy Valkey client/connection cache (see [`ValkeyEval`]'s doc comment for
 /// why this is built once and `Clone`d, not once per rule).
 enum BackendResource {
     /// Every rule gets its own in-process ledger (the default).
@@ -232,33 +242,131 @@ enum BackendResource {
         valkey: Box<ValkeyEval>,
         /// Key namespace prefix, see [`BackendConfig::namespace`].
         namespace: String,
+        /// Admission behavior for dependency failures.
+        on_failure: BackendOnFailure,
     },
 }
 
+impl BackendResource {
+    /// Failure policy copied into each compiled rule.
+    const fn on_failure(&self) -> BackendOnFailure {
+        match self {
+            Self::Memory => BackendOnFailure::Closed,
+            Self::Valkey { on_failure, .. } => *on_failure,
+        }
+    }
+}
+
 /// Resolve the filter's `backend:` block into a [`BackendResource`],
-/// opening the Valkey connection once up front if configured.
+/// validating the Redis/Valkey client once up front if configured. Network
+/// connection establishment remains lazy until the first operation.
 ///
 /// # Errors
 ///
-/// Returns [`FilterError`] if `backend.kind: valkey` is set without a
-/// `url`, or the URL fails to parse/expand.
+/// Returns [`FilterError`] for incomplete, contradictory, zero-timeout, or
+/// topology-incompatible settings, or when a URL fails to parse/expand.
+#[expect(
+    clippy::too_many_lines,
+    reason = "memory validation and the mutually exclusive standalone/Sentinel topology form one config boundary"
+)]
 fn build_backend_resource(backend: &BackendConfig) -> Result<BackendResource, FilterError> {
     match backend.kind {
-        BackendKind::Memory => Ok(BackendResource::Memory),
-        BackendKind::Valkey => {
-            let url = backend
-                .url
-                .as_deref()
-                .ok_or("token_rate_limit: backend.url is required for backend.kind: valkey")?;
-            let url = expand_backend_url(url)?;
+        BackendKind::Memory => {
+            if backend.url.is_some()
+                || backend.sentinel.is_some()
+                || backend.connect_timeout.is_some()
+                || backend.operation_timeout.is_some()
+                || backend.discovery_timeout.is_some()
+                || backend.on_failure != BackendOnFailure::Closed
+            {
+                return Err(
+                    "token_rate_limit: shared-backend settings are incompatible with backend.kind: memory".into(),
+                );
+            }
+            Ok(BackendResource::Memory)
+        },
+        BackendKind::Redis | BackendKind::Valkey => {
+            let timeouts = backend_timeouts(backend)?;
             let namespace = backend
                 .namespace
                 .clone()
                 .unwrap_or_else(|| "praxis:token_rate_limit".to_owned());
-            let valkey = Box::new(ValkeyEval::new(url)?);
-            Ok(BackendResource::Valkey { valkey, namespace })
+            let valkey = match (&backend.url, &backend.sentinel) {
+                (Some(_), Some(_)) => {
+                    return Err("token_rate_limit: backend.url and backend.sentinel are mutually exclusive".into());
+                },
+                (None, None) => {
+                    return Err(
+                        "token_rate_limit: backend.url or backend.sentinel is required for backend.kind: redis/valkey"
+                            .into(),
+                    );
+                },
+                (Some(url), None) => {
+                    if backend.discovery_timeout.is_some() {
+                        return Err(
+                            "token_rate_limit: backend.discovery_timeout is only valid with backend.sentinel".into(),
+                        );
+                    }
+                    ValkeyEval::standalone(expand_backend_url(url)?, timeouts, backend.kind.as_str())?
+                },
+                (None, Some(sentinel)) => build_sentinel_eval(sentinel, timeouts, backend.kind.as_str())?,
+            };
+            Ok(BackendResource::Valkey {
+                valkey: Box::new(valkey),
+                namespace,
+                on_failure: backend.on_failure,
+            })
         },
     }
+}
+
+/// Resolve configured backend timeouts while preserving standalone defaults.
+fn backend_timeouts(backend: &BackendConfig) -> Result<ValkeyTimeouts, FilterError> {
+    let parse = |value: Option<&String>, default: Duration| -> Result<Duration, FilterError> {
+        value.map_or(Ok(default), |value| parse_duration_ms(value).map(Duration::from_millis))
+    };
+    let timeouts = ValkeyTimeouts {
+        connect: parse(backend.connect_timeout.as_ref(), DEFAULT_CONNECT_TIMEOUT)?,
+        operation: parse(backend.operation_timeout.as_ref(), DEFAULT_OPERATION_TIMEOUT)?,
+        discovery: parse(backend.discovery_timeout.as_ref(), DEFAULT_DISCOVERY_TIMEOUT)?,
+    };
+    if backend.sentinel.is_some() && timeouts.connect > timeouts.discovery {
+        return Err(
+            "token_rate_limit: backend.connect_timeout must not exceed backend.discovery_timeout for Sentinel".into(),
+        );
+    }
+    Ok(timeouts)
+}
+
+/// Validate and build one Sentinel topology.
+fn build_sentinel_eval(
+    sentinel: &SentinelConfig,
+    timeouts: ValkeyTimeouts,
+    backend_name: &'static str,
+) -> Result<ValkeyEval, FilterError> {
+    if sentinel.endpoints.len() < 2 {
+        return Err("token_rate_limit: backend.sentinel.endpoints requires at least two entries".into());
+    }
+    if sentinel.service_name.trim().is_empty() {
+        return Err("token_rate_limit: backend.sentinel.service_name must not be empty".into());
+    }
+    let endpoints = sentinel
+        .endpoints
+        .iter()
+        .map(|endpoint| expand_sentinel_endpoint(endpoint))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut addresses = Vec::with_capacity(endpoints.len());
+    for endpoint in &endpoints {
+        let info = endpoint
+            .as_str()
+            .into_connection_info()
+            .map_err(|error| format!("token_rate_limit: invalid backend.sentinel endpoint: {error}"))?;
+        if addresses.iter().any(|address| address == info.addr()) {
+            return Err("token_rate_limit: backend.sentinel.endpoints must be distinct".into());
+        }
+        addresses.push(info.addr().clone());
+    }
+    ValkeyEval::sentinel(endpoints, sentinel.service_name.clone(), timeouts, backend_name).map_err(Into::into)
 }
 
 /// Build the configured state backend for a `sliding_window` rule
@@ -287,7 +395,7 @@ fn build_sliding_window_backend(
             .map_err(|error| format!("token_rate_limit: rule '{rule_name}': {error}"))?;
             Ok(Arc::new(InMemoryTokenRateLimitBackend::new(ledger)))
         },
-        BackendResource::Valkey { valkey, namespace } => {
+        BackendResource::Valkey { valkey, namespace, .. } => {
             Ok(Arc::new(ValkeyTokenRateLimitBackend::new(ValkeyBackendConfig {
                 valkey: (**valkey).clone(),
                 namespace: namespace.clone(),
@@ -333,7 +441,7 @@ fn build_token_bucket_backend(
             .map_err(|error| format!("token_rate_limit: rule '{rule_name}': {error}"))?;
             Ok(Arc::new(InMemoryTokenBucketBackend::new(ledger)))
         },
-        BackendResource::Valkey { valkey, namespace } => {
+        BackendResource::Valkey { valkey, namespace, .. } => {
             Ok(Arc::new(ValkeyTokenBucketBackend::new(ValkeyTokenBucketConfig {
                 valkey: (**valkey).clone(),
                 namespace: namespace.clone(),
@@ -521,6 +629,10 @@ struct CompiledRule {
     /// This rule's own admission state: in-process, or shared via
     /// Valkey; sliding-window or token-bucket.
     backend: Arc<dyn TokenRateLimitStateBackend>,
+
+    /// Filter-level dependency-failure policy copied here so admission can
+    /// decide without consulting topology configuration on the hot path.
+    on_failure: BackendOnFailure,
 
     /// Compiled estimation strategy for this rule.
     estimation: CompiledEstimation,
@@ -1092,6 +1204,7 @@ fn compile_rule(
     let capacity = rule.algorithm.capacity();
     let reservation_timeout_ms = validate_rule_bounds(&rule, capacity)?;
     let estimation = compile_estimation(&rule.name, rule.reserved_tokens, rule.estimation, capacity)?;
+    let on_failure = backend.on_failure();
     let backend = build_rule_backend(&rule.algorithm, backend, &rule.name, reservation_timeout_ms, max_keys)?;
     let matcher = compile_matcher(&rule.name, rule.r#match)?;
     let loc = format!("rule '{}'", rule.name);
@@ -1103,6 +1216,7 @@ fn compile_rule(
         name: rule.name,
         matcher,
         backend,
+        on_failure,
         estimation,
         weights,
         tiers,
@@ -1136,9 +1250,18 @@ fn compile_rule(
 /// #   missing: fallback
 /// max_keys: 100000                   # optional: per-rule cap on distinct budget keys
 /// backend:                           # optional: defaults to in-process state, shared by every rule
-///   kind: valkey                      # memory (default) | valkey
-///   url: "${TOKEN_RATE_LIMIT_VALKEY_URL}"
-///   namespace: praxis:token_rate_limit
+///   kind: redis                      # memory (default) | redis | valkey; redis/valkey are equivalent
+///   sentinel:                        # alternative to one standalone `url`
+///     endpoints:
+///       - "${TOKEN_RATE_LIMIT_SENTINEL_1_URL}"
+///       - "${TOKEN_RATE_LIMIT_SENTINEL_2_URL}"
+///       - "${TOKEN_RATE_LIMIT_SENTINEL_3_URL}"
+///     service_name: praxis-primary
+///   namespace: praxis:token_rate_limit:v2 # change generation for intentional accounting changes
+///   on_failure: closed               # closed (503) | open (bypassed/unconfirmed)
+///   connect_timeout: 500ms
+///   operation_timeout: 500ms
+///   discovery_timeout: 3s            # one overall Sentinel discovery deadline
 /// default_weights:                   # optional: omitted types default to 1.0
 ///   input: 1.0
 ///   output: 1.0
@@ -1353,6 +1476,38 @@ impl TokenRateLimitFilter {
         )
     }
 
+    /// Continue once without a reservation handle after an eligible shared
+    /// backend failure. Omitting all reconciliation metadata is deliberate:
+    /// neither a fabricated ID nor a later settlement may be attempted.
+    fn fail_open_action(
+        ctx: &mut HttpFilterContext<'_>,
+        rule: &CompiledRule,
+        estimate: u64,
+        error: &BackendError,
+        outcome: AdmissionFailureOutcome,
+    ) -> FilterAction {
+        let outcome = outcome.as_str();
+        ctx.filter_metadata.remove(META_RESERVATION_ID);
+        ctx.filter_metadata.remove(META_BUCKET_KEY);
+        ctx.filter_metadata.remove(META_RULE_INDEX);
+        ctx.filter_metadata.remove(META_ESTIMATE);
+        ctx.set_metadata(META_ENFORCEMENT_STATUS, outcome);
+        record_fail_open_metric(&rule.name, rule.backend.backend_name(), outcome);
+        record_admission_span(ctx, rule, estimate, outcome);
+        tracing::warn!(
+            target: "praxis_ai::token_rate_limit::accounting",
+            phase = "admission",
+            rule = rule.name,
+            algorithm = rule.backend.algorithm_name(),
+            backend = rule.backend.backend_name(),
+            result = outcome,
+            estimate,
+            error = error.kind(),
+            "token rate limit accounting"
+        );
+        FilterAction::Continue
+    }
+
     /// Turn a completed `reserve()` call into the `on_request` result:
     /// record admission metadata/metrics, evaluate graduated tiers and
     /// inject headers (S1), build the 429 rejection, or fail closed
@@ -1388,7 +1543,6 @@ impl TokenRateLimitFilter {
             Ok(BackendReserve::Denied { retry_after_ms, reason }) => {
                 tracing::info!(
                     estimate = pending.request_estimate,
-                    key = pending.key,
                     rule = rule.name,
                     ?reason,
                     "token_rate_limit: rejecting request (429)"
@@ -1398,10 +1552,28 @@ impl TokenRateLimitFilter {
             },
             Err(error) => {
                 record_backend_error_metric(&rule.name, rule.backend.backend_name());
-                record_accounting_failure(rule, "reserve", &error);
-                record_admission_span(ctx, rule, pending.request_estimate, "error");
-                tracing::error!(%error, rule = rule.name, "token_rate_limit: admission backend failed, failing closed");
-                FilterAction::Reject(Rejection::status(503))
+                if rule.on_failure == BackendOnFailure::Open
+                    && let Some(outcome) = error.admission_failure_outcome()
+                {
+                    tracing::warn!(
+                        %error,
+                        outcome = outcome.as_str(),
+                        rule = rule.name,
+                        "token_rate_limit: admission backend failed, continuing under open policy"
+                    );
+                    Self::fail_open_action(ctx, rule, pending.request_estimate, &error, outcome)
+                } else {
+                    record_accounting_failure(
+                        &rule.name,
+                        rule.backend.algorithm_name(),
+                        rule.backend.backend_name(),
+                        "reserve",
+                        &error,
+                    );
+                    record_admission_span(ctx, rule, pending.request_estimate, "error");
+                    tracing::error!(%error, rule = rule.name, "token_rate_limit: admission backend failed, failing closed");
+                    FilterAction::Reject(Rejection::status(503))
+                }
             },
         }
     }
@@ -1536,7 +1708,13 @@ impl TokenRateLimitFilter {
         }
         if let Err(error) = rule.backend.enqueue_reconcile(request) {
             record_backend_error_metric(&rule.name, rule.backend.backend_name());
-            record_accounting_failure(rule, "enqueue_reconcile", &error);
+            record_accounting_failure(
+                &rule.name,
+                rule.backend.algorithm_name(),
+                rule.backend.backend_name(),
+                "enqueue_reconcile",
+                &error,
+            );
             tracing::error!(%error, rule = rule.name, "token_rate_limit: failed to enqueue reconciliation");
         }
     }
@@ -1593,6 +1771,17 @@ fn record_backend_error_metric(rule_name: &str, backend: &'static str) {
     counter!(
         "praxis_trl_backend_errors_total",
         "backend" => backend,
+        "rule" => rule_name.to_owned(),
+    )
+    .increment(1);
+}
+
+/// Count one admission deliberately continued under `on_failure: open`.
+fn record_fail_open_metric(rule_name: &str, backend: &'static str, outcome: &'static str) {
+    counter!(
+        "praxis_trl_fail_open_admissions_total",
+        "backend" => backend,
+        "outcome" => outcome,
         "rule" => rule_name.to_owned(),
     )
     .increment(1);
@@ -1693,15 +1882,21 @@ fn record_accounting_settlement(
 }
 
 /// Emit a bounded accounting failure without request or user identifiers.
-fn record_accounting_failure(rule: &CompiledRule, operation: &'static str, error: &BackendError) {
+fn record_accounting_failure(
+    rule_name: &str,
+    algorithm: &'static str,
+    backend: &'static str,
+    operation: &'static str,
+    error: &BackendError,
+) {
     tracing::warn!(
         target: "praxis_ai::token_rate_limit::accounting",
         phase = operation,
-        rule = rule.name,
-        algorithm = rule.backend.algorithm_name(),
-        backend = rule.backend.backend_name(),
+        rule = rule_name,
+        algorithm,
+        backend,
         result = "failed",
-        error = %error,
+        error = error.kind(),
         "token rate limit accounting"
     );
 }
@@ -1856,6 +2051,7 @@ impl HttpFilter for TokenRateLimitFilter {
             ctx.filter_metadata.remove(META_BUCKET_KEY);
             ctx.filter_metadata.remove(META_RULE_INDEX);
             ctx.filter_metadata.remove(META_ESTIMATE);
+            ctx.filter_metadata.remove(META_ENFORCEMENT_STATUS);
             #[cfg(feature = "opentelemetry")]
             ctx.extensions.remove::<crate::opentelemetry::TokenRateLimitSpan>();
         }
@@ -1883,14 +2079,23 @@ fn expand_backend_url_with(
     url: &str,
     lookup: impl Fn(&str) -> Result<String, std::env::VarError>,
 ) -> Result<String, FilterError> {
-    let Some(start) = url.find("${") else {
-        return Ok(url.to_owned());
+    expand_backend_reference_with(url, "backend.url", lookup)
+}
+
+/// Shared environment-reference validation for standalone and Sentinel URLs.
+fn expand_backend_reference_with(
+    value: &str,
+    field: &str,
+    lookup: impl Fn(&str) -> Result<String, std::env::VarError>,
+) -> Result<String, FilterError> {
+    let Some(start) = value.find("${") else {
+        return Ok(value.to_owned());
     };
-    let Some(name) = url.strip_prefix("${").and_then(|value| value.strip_suffix('}')) else {
-        return Err("token_rate_limit: backend.url supports one complete ${ENV_VAR} reference".into());
+    let Some(name) = value.strip_prefix("${").and_then(|value| value.strip_suffix('}')) else {
+        return Err(format!("token_rate_limit: {field} supports one complete ${{ENV_VAR}} reference").into());
     };
     if start != 0 || name.contains("${") {
-        return Err("token_rate_limit: backend.url supports one complete ${ENV_VAR} reference".into());
+        return Err(format!("token_rate_limit: {field} supports one complete ${{ENV_VAR}} reference").into());
     }
     if name.is_empty()
         || !name
@@ -1898,15 +2103,21 @@ fn expand_backend_url_with(
             .enumerate()
             .all(|(index, byte)| byte == b'_' || byte.is_ascii_uppercase() || (index > 0 && byte.is_ascii_digit()))
     {
-        return Err("token_rate_limit: backend.url contains an invalid environment variable reference".into());
+        return Err(format!("token_rate_limit: {field} contains an invalid environment variable reference").into());
     }
-    lookup(name).map_err(|_error| "token_rate_limit: backend.url environment variable is not set".into())
+    lookup(name)
+        .map_err(|_error| FilterError::from(format!("token_rate_limit: {field} environment variable is not set")))
 }
 
 /// Expand one `${ENV_VAR}` reference in a backend URL against the real
 /// process environment.
 fn expand_backend_url(url: &str) -> Result<String, FilterError> {
     expand_backend_url_with(url, |name| std::env::var(name))
+}
+
+/// Expand one complete environment reference in a Sentinel endpoint.
+fn expand_sentinel_endpoint(endpoint: &str) -> Result<String, FilterError> {
+    expand_backend_reference_with(endpoint, "backend.sentinel.endpoints", |name| std::env::var(name))
 }
 
 /// Parse a simple `<number><unit>` duration (`ms`, `s`, `m`, `h`) into
@@ -1959,10 +2170,11 @@ mod backend_injection_tests {
         CompiledEstimation, CompiledRule, TokenRateLimitFilter,
         backend::{
             BackendError, BackendReserve, BackendSettlement, BackendSnapshot, ReconcileRequest, ReserveRequest,
-            TokenRateLimitStateBackend,
+            TokenRateLimitStateBackend, record_backend_connection, record_connection_invalidation,
+            record_primary_discovery_attempt, record_primary_rediscovery,
         },
-        record_backend_error_metric, record_request_metric, record_reserved_metric, record_settlement_metrics,
-        record_state_metrics, record_unauthenticated_metric,
+        record_backend_error_metric, record_fail_open_metric, record_request_metric, record_reserved_metric,
+        record_settlement_metrics, record_state_metrics, record_unauthenticated_metric,
     };
 
     /// A backend that admits every reservation but always fails to
@@ -1974,6 +2186,52 @@ mod backend_injection_tests {
     /// live worker's 1024-deep channel or tearing down its receiver
     /// mid-test.
     struct EnqueueAlwaysFailsBackend;
+
+    #[derive(Clone, Copy)]
+    enum TestReserveFailure {
+        Bypassed,
+        Unconfirmed,
+        InvalidResponse,
+        ConfigurationMismatch,
+    }
+
+    struct ReserveAlwaysFailsBackend(TestReserveFailure);
+
+    #[async_trait::async_trait]
+    impl TokenRateLimitStateBackend for ReserveAlwaysFailsBackend {
+        async fn reserve(&self, _request: ReserveRequest) -> Result<BackendReserve, BackendError> {
+            Err(match self.0 {
+                TestReserveFailure::Bypassed => BackendError::Unavailable("not dispatched (test)".into()),
+                TestReserveFailure::Unconfirmed => BackendError::Unconfirmed("possibly applied (test)".into()),
+                TestReserveFailure::InvalidResponse => BackendError::InvalidResponse,
+                TestReserveFailure::ConfigurationMismatch => BackendError::ConfigurationMismatch,
+            })
+        }
+
+        async fn reconcile(&self, _request: ReconcileRequest) -> Result<BackendSettlement, BackendError> {
+            panic!("a failed admission must not be reconciled")
+        }
+
+        fn enqueue_reconcile(&self, _request: ReconcileRequest) -> Result<(), BackendError> {
+            panic!("a failed admission must not enqueue reconciliation")
+        }
+
+        fn limit(&self) -> u64 {
+            1
+        }
+
+        fn snapshot(&self) -> BackendSnapshot {
+            BackendSnapshot::default()
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "test"
+        }
+
+        fn algorithm_name(&self) -> &'static str {
+            "test"
+        }
+    }
 
     #[async_trait::async_trait]
     impl TokenRateLimitStateBackend for EnqueueAlwaysFailsBackend {
@@ -2020,10 +2278,78 @@ mod backend_injection_tests {
             name: name.to_owned(),
             matcher: None,
             backend: std::sync::Arc::new(EnqueueAlwaysFailsBackend),
+            on_failure: super::BackendOnFailure::Closed,
             estimation: CompiledEstimation::Fixed { estimate: 1 },
             weights: super::TokenWeights::UNITY,
             tiers: Vec::new(),
             inject_header_names: Vec::new(),
+        }
+    }
+
+    fn reserve_always_fails_filter(
+        on_failure: super::BackendOnFailure,
+        failure: TestReserveFailure,
+    ) -> TokenRateLimitFilter {
+        TokenRateLimitFilter {
+            rules: vec![CompiledRule {
+                name: "default".to_owned(),
+                matcher: None,
+                backend: std::sync::Arc::new(ReserveAlwaysFailsBackend(failure)),
+                on_failure,
+                estimation: CompiledEstimation::Fixed { estimate: 1 },
+                weights: super::TokenWeights::UNITY,
+                tiers: Vec::new(),
+                inject_header_names: Vec::new(),
+            }],
+            needs_body: false,
+            key_spec: super::CompiledKeySpec::global(),
+            epoch: std::time::Instant::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_policy_records_bypassed_and_unconfirmed_without_a_reservation() {
+        for (failure, expected) in [
+            (TestReserveFailure::Bypassed, "bypassed"),
+            (TestReserveFailure::Unconfirmed, "unconfirmed"),
+            (TestReserveFailure::InvalidResponse, "unconfirmed"),
+        ] {
+            let filter = reserve_always_fails_filter(super::BackendOnFailure::Open, failure);
+            let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+            let mut ctx = crate::test_utils::make_filter_context(&req);
+
+            assert!(matches!(
+                filter.on_request(&mut ctx).await.unwrap(),
+                praxis_filter::FilterAction::Continue
+            ));
+            assert_eq!(ctx.get_metadata(super::META_ENFORCEMENT_STATUS), Some(expected));
+            assert!(ctx.get_metadata(super::META_RESERVATION_ID).is_none());
+            assert!(ctx.get_metadata(super::META_BUCKET_KEY).is_none());
+            assert!(ctx.get_metadata(super::META_RULE_INDEX).is_none());
+            assert!(ctx.get_metadata(super::META_ESTIMATE).is_none());
+
+            let mut body = None;
+            drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+            assert!(ctx.get_metadata(super::META_ENFORCEMENT_STATUS).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_policy_and_configuration_mismatch_reject_before_upstream() {
+        for (on_failure, failure) in [
+            (super::BackendOnFailure::Closed, TestReserveFailure::Bypassed),
+            (super::BackendOnFailure::Open, TestReserveFailure::ConfigurationMismatch),
+        ] {
+            let filter = reserve_always_fails_filter(on_failure, failure);
+            let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+            let mut ctx = crate::test_utils::make_filter_context(&req);
+            let action = filter.on_request(&mut ctx).await.unwrap();
+            assert!(
+                matches!(action, praxis_filter::FilterAction::Reject(rejection) if rejection.status == 503),
+                "closed enforcement must reject before upstream"
+            );
+            assert!(ctx.get_metadata(super::META_ENFORCEMENT_STATUS).is_none());
+            assert!(ctx.get_metadata(super::META_RESERVATION_ID).is_none());
         }
     }
 
@@ -2088,7 +2414,12 @@ mod backend_injection_tests {
             );
             record_state_metrics(&rule.name, rule.backend.as_ref());
             record_backend_error_metric(&rule.name, rule.backend.backend_name());
+            record_fail_open_metric(&rule.name, rule.backend.backend_name(), "bypassed");
             record_unauthenticated_metric(&rule.name);
+            record_primary_discovery_attempt("redis", "success");
+            record_backend_connection("redis", "sentinel", "initial", "success");
+            record_primary_rediscovery("redis", "success");
+            record_connection_invalidation("redis", "sentinel");
         });
 
         let snapshot = snapshotter.snapshot().into_vec();
@@ -2139,6 +2470,31 @@ mod backend_injection_tests {
         assert_eq!(
             labels_for("praxis_trl_backend_errors_total"),
             vec![vec!["backend".to_owned(), "rule".to_owned()]]
+        );
+        assert_eq!(
+            labels_for("praxis_trl_fail_open_admissions_total"),
+            vec![vec!["backend".to_owned(), "outcome".to_owned(), "rule".to_owned(),]]
+        );
+        assert_eq!(
+            labels_for("praxis_trl_primary_discovery_attempts_total"),
+            vec![vec!["backend".to_owned(), "result".to_owned()]]
+        );
+        assert_eq!(
+            labels_for("praxis_trl_backend_connections_total"),
+            vec![vec![
+                "backend".to_owned(),
+                "phase".to_owned(),
+                "result".to_owned(),
+                "topology".to_owned(),
+            ]]
+        );
+        assert_eq!(
+            labels_for("praxis_trl_primary_rediscoveries_total"),
+            vec![vec!["backend".to_owned(), "result".to_owned()]]
+        );
+        assert_eq!(
+            labels_for("praxis_trl_backend_connection_invalidations_total"),
+            vec![vec!["backend".to_owned(), "topology".to_owned()]]
         );
     }
 }

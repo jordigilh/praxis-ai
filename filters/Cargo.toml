@@ -87,7 +87,7 @@ praxis-core = { workspace = true }
 # Off-by-default experimental feature in praxis 0.7.0 (no extra dependencies).
 praxis-filter = { workspace = true, features = ["chain-binding"] }
 praxis-tls = { workspace = true }
-redis = { workspace = true, optional = true }
+redis = { workspace = true, optional = true, features = ["sentinel"] }
 rand = { workspace = true }
 reqwest = { workspace = true, optional = true }
 serde = { workspace = true }

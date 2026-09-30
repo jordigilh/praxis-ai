@@ -90,8 +90,9 @@ request-scoped `token_rate_limit` span. It records these bounded fields:
 - `token_rate_limit.estimated_cost`: tokens reserved or considered at admission.
 - `token_rate_limit.decision`: `admitted` (reservation made), `denied` (429,
   budget exhausted), `unauthenticated` (401, no trusted subject to key the
-  budget on), or `error` (503, the backend failed and the filter failed
-  closed).
+  budget on), `error` (503, the backend failed and the filter failed closed),
+  `bypassed` (open mode, mutation known not applied), or `unconfirmed` (open
+  mode, mutation may have committed).
 - `token_rate_limit.actual_cost`: provider-reported weighted usage, recorded
   when the response body ends. Absent when the decision was not `admitted`
   or no usage metadata was produced.
@@ -99,6 +100,6 @@ request-scoped `token_rate_limit` span. It records these bounded fields:
 The span is created at admission and dropped when the response body ends,
 so its lifetime covers the streamed response. It does not contain the
 authenticated subject, internal budget key, prompt, body, model, or other
-request-specific identity. Valkey reconciliation runs asynchronously after
+request-specific identity. Redis/Valkey reconciliation runs asynchronously after
 response processing; its success or failure is exposed through metrics and
 accounting logs rather than extending the span further.

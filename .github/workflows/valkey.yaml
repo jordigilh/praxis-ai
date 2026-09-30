@@ -1,25 +1,30 @@
-name: Tests (Token Rate Limit Valkey Backend)
+name: Tests (Token Rate Limit Redis/Valkey Backends)
 
 # ------------------------------------------------------------------------------
 # Workflow Settings
 # ------------------------------------------------------------------------------
 #
-# Every `token_rate_limit` test that needs a live Valkey/Redis (cross-instance
+# Every `token_rate_limit` test that needs a live Redis/Valkey (cross-instance
 # shared state, background-worker reconciliation, EVAL fault injection) is
-# gated on TOKEN_RATE_LIMIT_VALKEY_URL: unset, it early-returns rather than
-# failing, so `make test-unit`/`make test-integration` stay green on a
-# contributor's laptop with no Valkey running. That gate was never wired to
-# an actual Valkey anywhere in CI either, so it silently took the same
-# early-return path there too -- this workflow is that wiring, split out
-# (like postgres.yaml) so the common fast test/integration jobs don't all
-# pay for a service container on every unrelated change.
+# gated on explicit standalone or Sentinel environment variables: unset, they
+# early-return rather than failing, so ordinary local suites need no datastore.
+# This workflow sets `TOKEN_RATE_LIMIT_SENTINEL_REQUIRED=1` for HA lanes so a
+# missing or malformed topology cannot silently pass, and keeps the live matrix
+# separate (like postgres.yaml) so unrelated jobs do not pay for its containers.
+# Red Hat's exact image is terms-gated. GitHub withholds registry secrets from
+# fork pull requests, so only those untrusted rows defer; trusted branch, main,
+# workflow-dispatch, and merge-queue runs fail if credentials are unavailable.
 
 on:
   push:
     branches: [main]
     paths:
       - "filters/src/token_rate_limit/**"
+      - "filters/Cargo.toml"
       - "tests/integration/tests/suite/examples/token_rate_limit.rs"
+      - "tests/integration/fixtures/token_rate_limit/**"
+      - "examples/configs/token-rate-limit*.yaml"
+      - "docs/filters/token_rate_limit.md"
       - "Cargo.toml"
       - "Cargo.lock"
       - "Makefile"
@@ -29,7 +34,11 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - "filters/src/token_rate_limit/**"
+      - "filters/Cargo.toml"
       - "tests/integration/tests/suite/examples/token_rate_limit.rs"
+      - "tests/integration/fixtures/token_rate_limit/**"
+      - "examples/configs/token-rate-limit*.yaml"
+      - "docs/filters/token_rate_limit.md"
       - "Cargo.toml"
       - "Cargo.lock"
       - "Makefile"
@@ -77,7 +86,11 @@ jobs:
           CHANGED=$(git diff --name-only "${{ github.event.merge_group.base_sha }}" \
                                          "${{ github.event.merge_group.head_sha }}" -- \
             'filters/src/token_rate_limit/' \
+            'filters/Cargo.toml' \
             'tests/integration/tests/suite/examples/token_rate_limit.rs' \
+            'tests/integration/fixtures/token_rate_limit/' \
+            'examples/configs/token-rate-limit*.yaml' \
+            'docs/filters/token_rate_limit.md' \
             'Cargo.toml' \
             'Cargo.lock' \
             'Makefile' \
@@ -89,10 +102,10 @@ jobs:
           fi
 
   # ----------------------------------------------------------------------------
-  # token_rate_limit Valkey unit tests (praxis-ai-filters)
+  # Exact-pinned standalone compatibility matrix
   # ----------------------------------------------------------------------------
 
-  unit:
+  standalone:
     needs: [changes]
     if: |
       always() &&
@@ -100,32 +113,112 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-    services:
-      valkey:
-        image: docker.io/valkey/valkey:8-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "valkey-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - product: redis
+            version: 8.10.2
+            version_field: redis_version
+            image: docker.io/library/redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+            server_bin: /usr/local/bin/redis-server
+            cli_bin: /usr/local/bin/redis-cli
+          - product: red-hat-valkey
+            version: 8.0.11
+            version_field: valkey_version
+            image: registry.redhat.io/rhel10/valkey-8@sha256:5929be16ac020c4851d8dc1f5ead6d48c6da066a9a74349711186925ebd553b9
+            server_bin: /usr/bin/valkey-server
+            cli_bin: /usr/bin/valkey-cli
     env:
       TOKEN_RATE_LIMIT_VALKEY_URL: redis://127.0.0.1:6379
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Resolve exact-pinned lane availability
+        id: lane
+        env:
+          PRODUCT: ${{ matrix.product }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          REGISTRY_USERNAME: ${{ secrets.REDHAT_REGISTRY_USERNAME }}
+          REGISTRY_TOKEN: ${{ secrets.REDHAT_REGISTRY_TOKEN }}
+        run: |
+          if [ "$PRODUCT" != red-hat-valkey ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -n "$REGISTRY_USERNAME" ] && [ -n "$REGISTRY_TOKEN" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EVENT_NAME" = pull_request ] && [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
+            echo "::notice::Deferring the terms-gated Red Hat Valkey lane because GitHub withholds registry secrets from fork pull requests; merge queue qualification remains mandatory."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::error::REDHAT_REGISTRY_USERNAME and REDHAT_REGISTRY_TOKEN are required for trusted Red Hat Valkey qualification runs."
+          exit 1
+
+      - if: steps.lane.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Rust
+        if: steps.lane.outputs.run == 'true'
         uses: praxis-proxy/conventions/.github/actions/setup-rust@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
 
-      - name: token_rate_limit Valkey unit tests
+      - name: Authenticate to Red Hat registry
+        if: steps.lane.outputs.run == 'true' && matrix.product == 'red-hat-valkey'
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REDHAT_REGISTRY_USERNAME }}
+          REGISTRY_TOKEN: ${{ secrets.REDHAT_REGISTRY_TOKEN }}
+        run: |
+          test -n "$REGISTRY_USERNAME"
+          test -n "$REGISTRY_TOKEN"
+          printf '%s' "$REGISTRY_TOKEN" | docker login registry.redhat.io --username "$REGISTRY_USERNAME" --password-stdin
+
+      - name: Start exact-pinned standalone target
+        if: steps.lane.outputs.run == 'true'
+        run: |
+          docker pull '${{ matrix.image }}'
+          docker run --detach --rm --name trl-standalone \
+            --publish 127.0.0.1:6379:6379 \
+            --entrypoint '${{ matrix.server_bin }}' \
+            '${{ matrix.image }}' \
+            --bind 0.0.0.0 --protected-mode no --save '' --appendonly no
+          ready=false
+          for _ in $(seq 1 100); do
+            if docker exec trl-standalone '${{ matrix.cli_bin }}' ping | grep -qx PONG; then
+              ready=true
+              break
+            fi
+            sleep 0.1
+          done
+          test "$ready" = true
+
+      - name: Record and verify qualification inputs
+        if: steps.lane.outputs.run == 'true'
+        run: |
+          docker exec trl-standalone '${{ matrix.cli_bin }}' --version
+          actual=$(docker exec trl-standalone '${{ matrix.cli_bin }}' --raw INFO server | sed -n 's/^${{ matrix.version_field }}://p' | tr -d '\r')
+          test "$actual" = '${{ matrix.version }}'
+          docker image inspect '${{ matrix.image }}' --format '{{json .RepoDigests}}'
+          cargo tree -p praxis-ai-filters --features token-rate-limit-filter | grep -F 'redis v1.7.0'
+
+      - name: token_rate_limit shared-backend unit tests
+        if: steps.lane.outputs.run == 'true'
         run: make test-token-rate-limit-valkey-unit
 
+      - name: token_rate_limit shared-backend integration tests
+        if: steps.lane.outputs.run == 'true'
+        run: make test-token-rate-limit-valkey-integration
+
+      - name: Stop standalone target
+        if: always() && steps.lane.outputs.run == 'true'
+        run: docker rm --force trl-standalone || true
+
   # ----------------------------------------------------------------------------
-  # token_rate_limit Valkey integration test (cross-instance shared state)
+  # Exact-pinned Sentinel HA matrix: primary, replica, three Sentinels
   # ----------------------------------------------------------------------------
 
-  integration:
+  sentinel:
     needs: [changes]
     if: |
       always() &&
@@ -133,23 +226,135 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-    services:
-      valkey:
-        image: docker.io/valkey/valkey:8-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "valkey-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - product: redis
+            version: 8.10.2
+            version_field: redis_version
+            image: docker.io/library/redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+            server_bin: /usr/local/bin/redis-server
+            cli_bin: /usr/local/bin/redis-cli
+          - product: red-hat-valkey
+            version: 8.0.11
+            version_field: valkey_version
+            image: registry.redhat.io/rhel10/valkey-8@sha256:5929be16ac020c4851d8dc1f5ead6d48c6da066a9a74349711186925ebd553b9
+            server_bin: /usr/bin/valkey-server
+            cli_bin: /usr/bin/valkey-cli
     env:
-      TOKEN_RATE_LIMIT_VALKEY_URL: redis://127.0.0.1:6379
+      TOKEN_RATE_LIMIT_SENTINEL_REQUIRED: "1"
+      TOKEN_RATE_LIMIT_SENTINEL_URLS: redis://127.0.0.1:17210/,redis://127.0.0.1:17211/,redis://127.0.0.1:17212/
+      TOKEN_RATE_LIMIT_SENTINEL_SERVICE: praxis-master
+      TOKEN_RATE_LIMIT_SENTINEL_NODES: redis://127.0.0.1:17200/,redis://127.0.0.1:17201/
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Resolve exact-pinned lane availability
+        id: lane
+        env:
+          PRODUCT: ${{ matrix.product }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          REGISTRY_USERNAME: ${{ secrets.REDHAT_REGISTRY_USERNAME }}
+          REGISTRY_TOKEN: ${{ secrets.REDHAT_REGISTRY_TOKEN }}
+        run: |
+          if [ "$PRODUCT" != red-hat-valkey ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -n "$REGISTRY_USERNAME" ] && [ -n "$REGISTRY_TOKEN" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EVENT_NAME" = pull_request ] && [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
+            echo "::notice::Deferring the terms-gated Red Hat Valkey lane because GitHub withholds registry secrets from fork pull requests; merge queue qualification remains mandatory."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::error::REDHAT_REGISTRY_USERNAME and REDHAT_REGISTRY_TOKEN are required for trusted Red Hat Valkey qualification runs."
+          exit 1
+
+      - if: steps.lane.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Rust
+        if: steps.lane.outputs.run == 'true'
         uses: praxis-proxy/conventions/.github/actions/setup-rust@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
 
-      - name: token_rate_limit Valkey integration test
-        run: make test-token-rate-limit-valkey-integration
+      - name: Authenticate to Red Hat registry
+        if: steps.lane.outputs.run == 'true' && matrix.product == 'red-hat-valkey'
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REDHAT_REGISTRY_USERNAME }}
+          REGISTRY_TOKEN: ${{ secrets.REDHAT_REGISTRY_TOKEN }}
+        run: |
+          test -n "$REGISTRY_USERNAME"
+          test -n "$REGISTRY_TOKEN"
+          printf '%s' "$REGISTRY_TOKEN" | docker login registry.redhat.io --username "$REGISTRY_USERNAME" --password-stdin
+
+      - name: Start exact-pinned Sentinel topology
+        if: steps.lane.outputs.run == 'true'
+        run: |
+          docker pull '${{ matrix.image }}'
+          docker run --detach --rm --name trl-sentinel \
+            --publish 127.0.0.1:17200:17200 \
+            --publish 127.0.0.1:17201:17201 \
+            --publish 127.0.0.1:17210:17210 \
+            --publish 127.0.0.1:17211:17211 \
+            --publish 127.0.0.1:17212:17212 \
+            --env SERVER_BIN='${{ matrix.server_bin }}' \
+            --volume "$GITHUB_WORKSPACE/tests/integration/fixtures/token_rate_limit/start-sentinel-topology.sh:/start-sentinel-topology:ro" \
+            --entrypoint /bin/sh \
+            '${{ matrix.image }}' /start-sentinel-topology
+
+      - name: Wait for roles, quorum, and offset-verified replication
+        if: steps.lane.outputs.run == 'true'
+        run: |
+          ready=false
+          for _ in $(seq 1 200); do
+            primary=$(docker exec trl-sentinel '${{ matrix.cli_bin }}' -p 17200 --raw INFO replication 2>/dev/null | tr -d '\r' || true)
+            replica=$(docker exec trl-sentinel '${{ matrix.cli_bin }}' -p 17201 --raw INFO replication 2>/dev/null | tr -d '\r' || true)
+            quorum=$(docker exec trl-sentinel '${{ matrix.cli_bin }}' -p 17210 --raw SENTINEL CKQUORUM praxis-master 2>/dev/null | tr -d '\r' || true)
+            if printf '%s\n' "$primary" | grep -qx 'role:master' \
+              && printf '%s\n' "$replica" | grep -Eq '^role:(slave|replica)$' \
+              && printf '%s\n' "$replica" | grep -qx 'master_link_status:up' \
+              && printf '%s\n' "$quorum" | grep -q '^OK '; then
+              ready=true
+              break
+            fi
+            sleep 0.1
+          done
+          test "$ready" = true
+          docker exec trl-sentinel '${{ matrix.cli_bin }}' -p 17200 SET praxis:ci:replication-ready ready | grep -qx OK
+          docker exec trl-sentinel '${{ matrix.cli_bin }}' -p 17200 WAIT 1 5000 | grep -qx 1
+          docker exec trl-sentinel '${{ matrix.cli_bin }}' -p 17201 --raw GET praxis:ci:replication-ready | tr -d '\r' | grep -qx ready
+          docker exec trl-sentinel '${{ matrix.cli_bin }}' -p 17200 DEL praxis:ci:replication-ready | grep -qx 1
+
+      - name: Record and verify qualification inputs
+        if: steps.lane.outputs.run == 'true'
+        run: |
+          docker exec trl-sentinel '${{ matrix.cli_bin }}' --version
+          actual=$(docker exec trl-sentinel '${{ matrix.cli_bin }}' -p 17200 --raw INFO server | sed -n 's/^${{ matrix.version_field }}://p' | tr -d '\r')
+          test "$actual" = '${{ matrix.version }}'
+          docker image inspect '${{ matrix.image }}' --format '{{json .RepoDigests}}'
+          cargo tree -p praxis-ai-filters --features token-rate-limit-filter | grep -F 'redis v1.7.0'
+
+      - name: Sentinel client unit and live failover contract
+        if: steps.lane.outputs.run == 'true'
+        run: >-
+          cargo test -p praxis-ai-filters --features token-rate-limit-filter
+          token_rate_limit::backend::tests::live_sentinel_discovers_coalesces_and_recovers_without_mutation_replay
+          -- --nocapture
+
+      - name: Sentinel example and gateway failure contracts
+        if: steps.lane.outputs.run == 'true'
+        run: |
+          cargo test -p praxis-tests-integration --features basic-auth-filter,token-rate-limit-filter --test suite -- \
+            example_config_token_rate_limit_redis_sentinel \
+            example_config_token_rate_limit_valkey_sentinel \
+            sentinel_failure_policy_controls_provider_invocation \
+            sentinel_failover_preserves_shared_state_and_post_failover_enforcement \
+            sentinel_noreplicas_obeys_closed_and_open_failure_policies \
+            --nocapture --test-threads=4
+
+      - name: Stop Sentinel topology
+        if: always() && steps.lane.outputs.run == 'true'
+        run: docker rm --force trl-sentinel || true

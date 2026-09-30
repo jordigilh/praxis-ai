@@ -25,10 +25,11 @@
 # uses one such catch-all rule. `window`/`capacity` match the proposal's
 # own field names: "Windows are sliding: a `window: 1h` budget tracks
 # usage in the most recent 60 minutes from the current instant." State
-# defaults to in-process; set a filter-level `backend: {kind: valkey,
-# url: ..., namespace: ...}` (a sibling of `rules:`, not per-rule) to
-# share every rule's budget across every gateway instance/replica over
-# one shared connection.
+# defaults to in-process; set a filter-level `backend:` (a sibling of
+# `rules:`, not per-rule) with equivalent `kind: redis` or `kind: valkey`
+# and either one standalone `url` or a `sentinel` topology to share every
+# rule's budget across gateway instances. See the two
+# `token-rate-limit-*-sentinel.yaml` examples for HA and failure policy.
 #
 # Set `key:` to partition each matching rule's budget. Scalars
 # (`global`, `authenticated_subject`, `ip`, `model`), a header mapping

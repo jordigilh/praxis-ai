@@ -1,0 +1,68 @@
+# Token Rate Limiting — Redis Sentinel
+#
+# Runs shared token-quota state through Redis Sentinel with cached writable-primary discovery.
+# Redis and Valkey are equivalent selectors for the same backend; the sibling
+# Valkey example has the same schema and behavior. Each endpoint is a Sentinel,
+# not a data-node URL.
+#
+# Production HA guidance:
+#   - run at least three Sentinels in independent failure domains;
+#   - configure quorum, persistence, min-replicas-to-write, and
+#     min-replicas-max-lag for the deployment's durability goals;
+#   - monitor SENTINEL CKQUORUM;
+#   - do not assume acknowledged writes have RPO=0. Replication is
+#     asynchronous and Praxis does not issue WAIT or WAITAOF per mutation.
+#
+# `on_failure: closed` returns 503 before provider contact when admission
+# cannot be confirmed. `open` instead invokes the provider once without a
+# reservation and records `bypassed` or `unconfirmed`; it is separate from a
+# filter chain's `failure_mode`, which handles unexpected filter errors.
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path: "/v1/chat/completions"
+            cluster: backend
+
+      - filter: token_rate_limit
+        backend:
+          kind: redis
+          sentinel:
+            endpoints:
+              - "${TOKEN_RATE_LIMIT_SENTINEL_1_URL}"
+              - "${TOKEN_RATE_LIMIT_SENTINEL_2_URL}"
+              - "${TOKEN_RATE_LIMIT_SENTINEL_3_URL}"
+            service_name: praxis-primary
+          namespace: praxis:token_rate_limit:redis-sentinel:v1
+          on_failure: closed
+          connect_timeout: 500ms
+          operation_timeout: 500ms
+          discovery_timeout: 3s
+        rules:
+          - name: default
+            algorithm: sliding_window
+            window: 1h
+            capacity: 100000
+            reserved_tokens: 500
+
+      - filter: token_count
+        provider: openai
+
+      - filter: access_log
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true

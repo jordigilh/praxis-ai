@@ -41,7 +41,7 @@ endif
 	test-schema test-integration test-inference-fixtures \
 	test-store-features \
 	test-postgres-unit test-postgres-integration test-environment \
-	test-token-rate-limit-valkey-unit test-token-rate-limit-valkey-integration \
+	test-token-rate-limit-valkey-unit test-token-rate-limit-valkey-integration test-token-rate-limit-sentinel \
 	openai-conformance check-openai-conformance-reference test-openai-conformance \
 	test-responses-conformance \
 	lint lint-clippy lint-xtask lint-lean check-dep-budget fmt doc audit coverage-check \
@@ -204,12 +204,25 @@ test-postgres-integration:
 
 test-token-rate-limit-valkey-unit:
 	cargo test -p praxis-ai-filters --features token-rate-limit-filter valkey $(_NOCAPTURE)
+	cargo test -p praxis-ai-filters --features token-rate-limit-filter \
+		eval_times_out_and_invalidates_the_connection_when_wedged $(_NOCAPTURE)
 
 test-token-rate-limit-valkey-integration:
 	cargo test -p praxis-tests-integration --features basic-auth-filter,token-rate-limit-filter --test suite \
 		mixed_algorithm_rules_valkey_backend_isolates_budgets_across_gateway_replicas $(_NOCAPTURE)
 	cargo test -p praxis-tests-integration --features basic-auth-filter,token-rate-limit-filter --test suite \
 		authenticated_subject_valkey_backend_isolates_budgets_across_gateway_replicas $(_NOCAPTURE)
+
+test-token-rate-limit-sentinel:
+	cargo test -p praxis-ai-filters --features token-rate-limit-filter \
+		live_sentinel_discovers_coalesces_and_recovers_without_mutation_replay $(_NOCAPTURE)
+	cargo test -p praxis-tests-integration --features basic-auth-filter,token-rate-limit-filter --test suite -- \
+		example_config_token_rate_limit_redis_sentinel \
+		example_config_token_rate_limit_valkey_sentinel \
+		sentinel_failure_policy_controls_provider_invocation \
+		sentinel_failover_preserves_shared_state_and_post_failover_enforcement \
+		sentinel_noreplicas_obeys_closed_and_open_failure_policies \
+		$(if $(V),--nocapture)
 
 openai-conformance:
 	cargo xtask openai-conformance $(OPENAI_CONFORMANCE_ARGS)
@@ -798,8 +811,9 @@ help:
 	@echo "  test-inference-fixtures  inference fixture and replay tests"
 	@echo "  test-postgres-unit       postgres store unit tests (needs DATABASE_URL)"
 	@echo "  test-postgres-integration postgres store integration tests (needs container engine)"
-	@echo "  test-token-rate-limit-valkey-unit        token_rate_limit Valkey unit tests (needs TOKEN_RATE_LIMIT_VALKEY_URL)"
-	@echo "  test-token-rate-limit-valkey-integration token_rate_limit Valkey integration test (needs TOKEN_RATE_LIMIT_VALKEY_URL)"
+	@echo "  test-token-rate-limit-valkey-unit        token_rate_limit Redis/Valkey unit tests (needs TOKEN_RATE_LIMIT_VALKEY_URL)"
+	@echo "  test-token-rate-limit-valkey-integration token_rate_limit Redis/Valkey integration tests (needs TOKEN_RATE_LIMIT_VALKEY_URL)"
+	@echo "  test-token-rate-limit-sentinel           token_rate_limit Sentinel HA tests (needs TOKEN_RATE_LIMIT_SENTINEL_*)"
 	@echo "  test-environment     llm-d ext_proc environment tests"
 	@echo "  openai-conformance   compare registered API areas with OpenAI's OpenAPI spec"
 	@echo "  check-openai-conformance-reference  verify the pinned complete OpenAI reference"

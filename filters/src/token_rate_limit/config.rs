@@ -20,8 +20,8 @@ use serde::Deserialize;
 /// which is off by default and activates the `experimental` marker.
 /// This filter delivers the agreed M1/M2/M6/M7 milestone scope, but its
 /// parent proposal is not yet `accepted` and open questions remain
-/// (HA/clustered-Valkey failure modes, and the relationship to
-/// Kuadrant's `TokenRateLimitPolicy` -- see `ai#127`). The
+/// (native Redis/Valkey Cluster is out of scope, as is the relationship
+/// to Kuadrant's `TokenRateLimitPolicy` -- see `ai#127`). The
 /// configuration surface may change between releases.
 ///
 /// Mirrors the `rules:`/`match:` shape from the `00121_token-rate-limiting`
@@ -31,6 +31,27 @@ use serde::Deserialize;
 /// token-type weights (`default_weights` / per-rule `weights`). CEL
 /// matchers and soft-limit tiers are still out of scope (see the module
 /// doc comment) -- upstream itself defers those.
+///
+/// The initially qualified shared-datastore targets are Redis 8.10.2 and
+/// Red Hat Valkey 8.0.11 from the RHEL 10 Application Stream. They have the
+/// same supported backend schema, behavior, test suite, and release gates;
+/// neither is a preferred implementation or compatibility fallback. The
+/// qualification is scoped to commands and standalone/Sentinel topology
+/// behavior used by this filter, not every product command, module, managed
+/// service, or a claim of universal cross-product compatibility. Reproducible
+/// qualification pins the official Redis 8.10.2 Alpine image at
+/// `sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0`
+/// and the Red Hat Valkey 8.0.11 image at
+/// `sha256:5929be16ac020c4851d8dc1f5ead6d48c6da066a9a74349711186925ebd553b9`;
+/// image provenance does not imply different Praxis support status.
+///
+/// | Qualified target | Standalone | Sentinel HA |
+/// |---|---|---|
+/// | Redis 8.10.2 | Supported | Supported |
+/// | Red Hat Valkey 8.0.11 | Supported | Supported |
+///
+/// Native Redis/Valkey Cluster and other managed-service HA mechanisms are
+/// outside this matrix.
 ///
 /// Assumes request identity has already been resolved upstream (this
 /// filter doesn't authenticate callers) -- a catch-all rule (no
@@ -63,9 +84,22 @@ use serde::Deserialize;
 /// - `praxis_trl_soft_tier_activations_total{rule,capacity}`
 ///
 /// - `praxis_trl_backend_errors_total{rule,backend}`: failed reservations (the 503 path) and reconciliations abandoned
-///   after their retries.
+///   after any bounded safe retries.
 ///
-/// - `praxis_trl_backend_reconciliation_total{rule,backend,result}`: reconciliations completed by a Valkey worker.
+/// - `praxis_trl_fail_open_admissions_total{rule,backend,outcome}`: admissions continued under `on_failure: open`;
+///   `outcome` is `bypassed` or `unconfirmed`.
+///
+/// - `praxis_trl_backend_reconciliation_total{rule,backend,result}`: reconciliations completed by a Redis/Valkey
+///   worker.
+///
+/// - `praxis_trl_primary_discovery_attempts_total{backend,result}`: bounded Sentinel discovery attempts.
+///
+/// - `praxis_trl_primary_rediscoveries_total{backend,result}`: completed primary rediscovery cycles.
+///
+/// - `praxis_trl_backend_connections_total{backend,topology,phase,result}`: initial and replacement data connections.
+///
+/// - `praxis_trl_backend_connection_invalidations_total{backend,topology}`: stale or ambiguous connections removed from
+///   the cache.
 ///
 /// - `praxis_trl_budget_remaining{rule,algorithm}`
 ///
@@ -85,10 +119,10 @@ use serde::Deserialize;
 ///
 /// Gauge scope depends on the backend. With the `memory` backend every
 /// gauge describes this process only, so aggregate replicas with `sum`.
-/// With the `valkey` backend every replica exports the rule-wide value it
-/// last observed from the shared store, so aggregate replicas with `max`;
+/// With either shared `redis`/`valkey` selector every replica exports the
+/// rule-wide value it last observed from the shared store, so aggregate replicas with `max`;
 /// a replica that stops seeing traffic for a rule keeps exporting its last
-/// observation until it does. Valkey applies expiry incrementally on each
+/// observation until it does. The shared backend applies expiry incrementally on each
 /// admission, so its counts can briefly include entries that have just
 /// expired.
 ///
@@ -101,7 +135,37 @@ use serde::Deserialize;
 /// {"praxis_ai::token_rate_limit::accounting": "warn"}`, and separate them
 /// from other operational logs by filtering on the `target` field. The
 /// records contain bounded policy and token-count fields only. They are
-/// best-effort operational audit records, not a durable billing source.
+/// best-effort operational audit records, not a durable billing source. A
+/// failure's `error` field is one of `unavailable`, `unconfirmed`,
+/// `invalid_response`, or `configuration_mismatch`, never a raw endpoint or
+/// datastore error string.
+/// Connection invalidation and Sentinel rediscovery records use the separate
+/// `praxis_ai::token_rate_limit::backend` target and never include endpoint,
+/// subject, or bucket-key values.
+///
+/// `backend.on_failure` handles expected shared-datastore dependency failures;
+/// it is distinct from the pipeline-level `failure_mode`, which handles
+/// unexpected filter execution errors. `closed` (the default) returns 503
+/// before upstream invocation whenever admission cannot be confirmed. `open`
+/// invokes upstream exactly once without a reservation handle and records
+/// `bypassed` when the mutation is known not to have run or `unconfirmed` when
+/// it may have committed. Confirmed quota exhaustion remains 429 under either
+/// policy, and accounting-configuration mismatches always fail closed.
+///
+/// Sentinel discovery is read-only and bounded. Healthy requests reuse one
+/// cached writable-primary connection, adding no discovery command or network
+/// round trip relative to standalone operation. Praxis never automatically
+/// replays an ambiguously dispatched reservation or reconciliation and does
+/// not issue per-write `WAIT` or `WAITAOF`; primary/replica replication
+/// remains asynchronous.
+/// Consequently an acknowledged write can be lost if a primary fails before
+/// replication, and a partitioned old primary can accept writes later
+/// discarded. This backend does not provide RPO=0 or strong consistency.
+///
+/// An HA deployment should run at least three Sentinels in independent failure
+/// domains with an appropriate quorum, enable persistence on primary and
+/// replicas, configure `min-replicas-to-write` and `min-replicas-max-lag` for
+/// its durability goals, and monitor `SENTINEL CKQUORUM`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TokenRateLimitConfig {
@@ -136,7 +200,7 @@ pub(super) struct TokenRateLimitConfig {
     /// this cap is denied (429, accounting outcome `key_capacity`)
     /// rather than growing without bound.
     ///
-    /// In-process ledgers enforce the cap per rule. Valkey enforces it
+    /// In-process ledgers enforce the cap per rule. Redis/Valkey enforces it
     /// against the per-rule retained-key set (`{namespace}:v1:rule:{hash}:keys`,
     /// or the token-bucket equivalent), not the namespace-wide set.
     /// Idle in-process keys are reaped by ledger cleanup, which walks a
@@ -146,14 +210,14 @@ pub(super) struct TokenRateLimitConfig {
     pub max_keys: usize,
 
     /// Where every rule's admission state lives: in-process (default,
-    /// one budget per gateway instance) or a shared Valkey backend (one
+    /// one budget per gateway instance) or a shared Redis/Valkey backend (one
     /// budget shared across every gateway instance/replica). One
     /// backend for the whole filter, not per rule -- rules already
-    /// share Valkey key-space isolation via `namespace`/rule-name
+    /// share datastore key-space isolation via `namespace`/rule-name
     /// hashing, so per-rule backend selection bought no isolation
-    /// benefit, only a separate Valkey connection per rule pointed at
+    /// benefit, only a separate connection per rule pointed at
     /// the same URL. Revisit if a real deployment ever needs to mix
-    /// in-process and Valkey rules in one filter instance.
+    /// in-process and shared rules in one filter instance.
     #[serde(default)]
     pub backend: BackendConfig,
 
@@ -651,11 +715,11 @@ fn ip_dimension(ip: IpRef) -> KeyDimension {
 // flattened enum's own error path instead of this struct's.
 #[derive(Debug, Deserialize)]
 pub(super) struct RuleConfig {
-    /// Human-readable rule identifier, folded into Valkey key
+    /// Human-readable rule identifier, folded into Redis/Valkey key
     /// namespacing so distinct rules sharing one backend never collide.
     ///
-    /// Renaming a live `valkey`-backed rule is therefore not a
-    /// no-op for operators: it changes the Valkey key hash, so the old
+    /// Renaming a live `redis`/`valkey`-backed rule is therefore not a
+    /// no-op for operators: it changes the datastore key hash, so the old
     /// name's tracked budget is orphaned (left to expire on its own TTL)
     /// and the new name starts with a fresh budget. There's no
     /// migration/rename path today -- routine config hygiene (e.g.
@@ -825,15 +889,22 @@ pub(super) struct BackendConfig {
 
     /// Backend connection URL. Supports one `${ENV_VAR}` reference, so
     /// credentials/hostnames don't need to be committed to config.
-    /// Required when `kind: valkey`, ignored otherwise.
+    /// Required for a standalone `redis`/`valkey` backend and mutually
+    /// exclusive with [`Self::sentinel`]. Existing `kind: valkey` + `url`
+    /// configurations remain unchanged.
     #[serde(default)]
     pub url: Option<String>,
 
+    /// Sentinel topology for a highly available shared backend. Mutually
+    /// exclusive with [`Self::url`].
+    #[serde(default)]
+    pub sentinel: Option<SentinelConfig>,
+
     /// Key namespace prefix, so multiple filter rules or deployments can
-    /// share one Valkey instance without colliding. Ignored for
+    /// share one Redis/Valkey instance without colliding. Ignored for
     /// `kind: memory`. Defaults to `"praxis:token_rate_limit"` when unset.
     ///
-    /// Valkey permanently records a schema-versioned fingerprint for each
+    /// The datastore permanently records a schema-versioned fingerprint for each
     /// namespace/rule/algorithm identity. Replicas with a different window,
     /// capacity, refill rate, reservation timeout, or state bound fail closed
     /// with 503 before mutating shared state. To make an intentional semantic
@@ -841,6 +912,58 @@ pub(super) struct BackendConfig {
     /// changing configuration in place is deliberately rejected.
     #[serde(default)]
     pub namespace: Option<String>,
+
+    /// Admission behavior when the shared backend cannot confirm a
+    /// reservation. `closed` (default) returns 503 without invoking upstream.
+    /// `open` continues exactly once without a reservation handle and records
+    /// `bypassed` or `unconfirmed`. Quota denials remain 429 under either
+    /// policy, and an accounting-configuration mismatch always fails closed.
+    /// This is separate from the pipeline-level `failure_mode`, which governs
+    /// unexpected filter execution errors.
+    #[serde(default)]
+    pub on_failure: BackendOnFailure,
+
+    /// Maximum time to establish a standalone or discovered-primary data
+    /// connection. Defaults to `500ms`.
+    #[serde(default)]
+    pub connect_timeout: Option<String>,
+
+    /// Maximum time to wait for one datastore command response. Defaults to
+    /// `500ms`.
+    #[serde(default)]
+    pub operation_timeout: Option<String>,
+
+    /// Overall deadline for Sentinel traversal, transient-convergence retry,
+    /// and connection establishment. Sentinel-only; defaults to `3s`.
+    #[serde(default)]
+    pub discovery_timeout: Option<String>,
+}
+
+/// Sentinel endpoints and monitored writable-primary service.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SentinelConfig {
+    /// Sentinel connection URLs. At least two distinct endpoints are required
+    /// so discovery can survive one unavailable Sentinel; production guidance
+    /// recommends three in independent failure domains.
+    pub endpoints: Vec<String>,
+
+    /// Name passed to `SENTINEL get-master-addr-by-name` through `redis-rs`.
+    pub service_name: String,
+}
+
+/// Behavior when a shared-backend dependency failure prevents confirmed
+/// admission.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum BackendOnFailure {
+    /// Reject with 503 before upstream invocation.
+    #[default]
+    Closed,
+
+    /// Continue exactly once without a reservation handle, recording whether
+    /// the failed mutation was bypassed or may be unconfirmed.
+    Open,
 }
 
 /// Which state backend a `token_rate_limit` rule uses.
@@ -852,9 +975,24 @@ pub(super) enum BackendKind {
     #[default]
     Memory,
 
-    /// Valkey-backed shared state: one budget shared across every gateway
-    /// instance pointed at the same `namespace`.
+    /// Redis-backed shared state. This is an equivalent selector for the same
+    /// datastore capability and schema as [`Self::Valkey`].
+    Redis,
+
+    /// Valkey-backed shared state. Equivalent to [`Self::Redis`]; both
+    /// selectors support standalone and Sentinel topologies.
     Valkey,
+}
+
+impl BackendKind {
+    /// Stable bounded telemetry label matching the configured selector.
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Redis => "redis",
+            Self::Valkey => "valkey",
+        }
+    }
 }
 
 /// Configurable estimation strategy for computing the token cost
