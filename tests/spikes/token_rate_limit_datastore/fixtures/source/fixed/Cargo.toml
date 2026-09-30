@@ -1,7 +1,5 @@
 [workspace]
 resolver = "3"
-# The checkpointed datastore spike keeps its own pinned dependency graph.
-exclude = ["tests/spikes/token_rate_limit_datastore"]
 members = [
     "store",
     "store-backends",

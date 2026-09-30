@@ -1,0 +1,3 @@
+# Preserve the standalone harness formatting and its recorded source hashes.
+edition = "2024"
+max_width = 100

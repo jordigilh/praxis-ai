@@ -1,0 +1,95 @@
+{
+  "claims": [
+    {
+      "claim": "The harness inputs are frozen upstream and PR revisions with per-file SHA-256 hashes.",
+      "evidence": [
+        "static-audit.json",
+        "../fixtures/source/manifest.json"
+      ],
+      "id": "source.freeze"
+    },
+    {
+      "claim": "Both frozen Lua algorithms silently under-enforce under mixed writer configurations on Redis 8.10.2 and Red Hat Valkey 8.0.11: sliding history is deleted early and a depleted token bucket regains full capacity early after shortened expiry.",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json",
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "id": "products.mixed_ttl"
+    },
+    {
+      "claim": "EVAL and EVALSHA have equal normalized lifecycle semantics and equal invariant outcomes in the executed gate.",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json",
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "id": "eval.evalsha.equivalence"
+    },
+    {
+      "claim": "The frozen plain-command revision contains source-proven settlement, concurrency, cap, and TTL blockers.",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "id": "plain.nonconformant"
+    },
+    {
+      "claim": "Frozen layouts reject atomically or are decomposed by redis-rs; dynamic cleanup can access a key owned by another primary.",
+      "evidence": [
+        "runtime/redis-8.10.2-cluster-negative.json",
+        "runtime/red-hat-valkey-8.0.11-cluster-negative.json",
+        "static-audit.json"
+      ],
+      "id": "cluster.negative_controls"
+    },
+    {
+      "claim": "Exact shared aggregate semantics and cross-primary subject distribution are mutually incompatible without a contract change or coordination layer.",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "id": "cluster.aggregate_impossibility"
+    },
+    {
+      "claim": "The terms-gated Red Hat Valkey repository is served from authenticated registry.redhat.io rather than registry.access.redhat.com; the exact requested manifest digest was preserved and executed.",
+      "evidence": [
+        "environment.json",
+        "runtime/red-hat-valkey-8.0.11-standalone.json",
+        "runtime/valkey-preflight-declared-registry.txt",
+        "runtime/valkey-preflight-default-auth.txt"
+      ],
+      "id": "valkey.registry.resolved"
+    },
+    {
+      "claim": "Pre-execution source and requirements claims remain traced in the local audited proposal.",
+      "evidence": [
+        "../../redis-valkey-compat-performance-spike-audit.md"
+      ],
+      "id": "draft.source_audit"
+    },
+    {
+      "claim": "The mixed-configuration repair passes the same standalone semantic and mismatch-before-mutation suite on both exact products under EVAL and EVALSHA.",
+      "evidence": [
+        "runtime/redis-8.10.2-fixed-standalone.json",
+        "runtime/red-hat-valkey-8.0.11-fixed-standalone.json"
+      ],
+      "id": "repair.standalone"
+    },
+    {
+      "claim": "The repair passes cached-primary, unavailable-Sentinel, replication-health, ambiguous-timeout, planned failover, unplanned shutdown, cold-script, and post-failover enforcement scenarios on both products.",
+      "evidence": [
+        "runtime/redis-8.10.2-sentinel-eval.json",
+        "runtime/redis-8.10.2-sentinel-evalsha.json",
+        "runtime/red-hat-valkey-8.0.11-sentinel-eval.json",
+        "runtime/red-hat-valkey-8.0.11-sentinel-evalsha.json"
+      ],
+      "id": "repair.sentinel"
+    },
+    {
+      "claim": "Cached Sentinel steady state has command/round-trip parity with standalone. No numeric latency or throughput claim is made from the local functional host.",
+      "evidence": [
+        "environment.json",
+        "result-matrix.json"
+      ],
+      "id": "repair.performance"
+    }
+  ],
+  "schema_version": 2
+}

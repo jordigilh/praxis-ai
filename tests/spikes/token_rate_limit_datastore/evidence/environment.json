@@ -1,0 +1,313 @@
+{
+  "captured_at": "2026-09-30T13:19:00.056112+00:00",
+  "container_vm": {
+    "architecture": "arm64",
+    "cgroup_version": "v2",
+    "cpus": 6,
+    "distribution": {
+      "distribution": "fedora",
+      "variant": "coreos",
+      "version": "44"
+    },
+    "kernel": "7.1.10-200.fc44.aarch64",
+    "memory_bytes": 14575312896,
+    "network_backend": "netavark",
+    "oci_runtime": "crun",
+    "podman_version": "5.8.7"
+  },
+  "harness": {
+    "files": [
+      {
+        "bytes": 24908,
+        "path": "Cargo.lock",
+        "sha256": "6d2fe98ed9529a916be3aeeb6f264266c3a88765b4992fcc45fe22d8a6137cc4"
+      },
+      {
+        "bytes": 629,
+        "path": "Cargo.toml",
+        "sha256": "2ada4b505670e6ff80dabefbd9682a1f7e634c5b5258a067c276f647377459ca"
+      },
+      {
+        "bytes": 3703,
+        "path": "README.md",
+        "sha256": "fe27c21e1f91ccf2becb2f6394ea7ca2e1d80a558abc4335e2144f62d8eca6ee"
+      },
+      {
+        "bytes": 174284,
+        "path": "fixtures/source/baseline/Cargo.lock",
+        "sha256": "d73d2345cb723cab5b06fa135e797825012d8f00102c9992bfd867dad5b07f6f"
+      },
+      {
+        "bytes": 11799,
+        "path": "fixtures/source/baseline/Cargo.toml",
+        "sha256": "b42fb07efa71465b9316e6f7e3f0be0826d81da744f416d7c577c5a63b68f389"
+      },
+      {
+        "bytes": 97476,
+        "path": "fixtures/source/baseline/backend.rs",
+        "sha256": "bef06c8e5d03680c972b7162891bd65a2ae6a500edf5a9ad03ea988e86bcecc6"
+      },
+      {
+        "bytes": 26786,
+        "path": "fixtures/source/baseline/config.rs",
+        "sha256": "ff7d11b9a13c710dba9e31daf3d7616050820579a73313d8b906be2d5305004b"
+      },
+      {
+        "bytes": 2296,
+        "path": "fixtures/source/baseline/lua/sliding_window_reconcile.lua",
+        "sha256": "3fc7237c0b5cbd1a0cfff9d80eb36af74d0afb3af856516d011f5a0e26f4022b"
+      },
+      {
+        "bytes": 7067,
+        "path": "fixtures/source/baseline/lua/sliding_window_reserve.lua",
+        "sha256": "0662b83684add7eb839842d97c86f686ffa9c3a4f560b2eb4a719cf366787731"
+      },
+      {
+        "bytes": 2381,
+        "path": "fixtures/source/baseline/lua/token_bucket_reconcile.lua",
+        "sha256": "3a245dc656ae17c79f58a604cd19c11c119fd466243d15b0c85d7414c8b72980"
+      },
+      {
+        "bytes": 5529,
+        "path": "fixtures/source/baseline/lua/token_bucket_reserve.lua",
+        "sha256": "1e71f86a609d36ee569825a96bda21ed6c0dfae9e226866b12d581608090cb0b"
+      },
+      {
+        "bytes": 82777,
+        "path": "fixtures/source/baseline/mod.rs",
+        "sha256": "ff979a6c58ddd62e4ebf200d35d7d70ba0cd8c65b5f8be0c0c38329838a3a1c1"
+      },
+      {
+        "bytes": 175056,
+        "path": "fixtures/source/fixed/Cargo.lock",
+        "sha256": "75396fc72d8637179356088c8bb0b0f28409c699a582f05c09af22caf0bcf1a7"
+      },
+      {
+        "bytes": 12063,
+        "path": "fixtures/source/fixed/Cargo.toml",
+        "sha256": "4ffad9e613e992c0c5fb5a70593f1ef0f23795fe5601bace31d45a17eecac094"
+      },
+      {
+        "bytes": 127437,
+        "path": "fixtures/source/fixed/backend.rs",
+        "sha256": "bb953b445a17b4ed5468872eba6e843642d175396585e6a45a236ea18b1e69da"
+      },
+      {
+        "bytes": 47821,
+        "path": "fixtures/source/fixed/config.rs",
+        "sha256": "5f0ff6298a7588ec0ad285c378b1e6931c25c599788021efb724389553d4a2d3"
+      },
+      {
+        "bytes": 2954,
+        "path": "fixtures/source/fixed/lua/sliding_window_reconcile.lua",
+        "sha256": "55ada254b2060d3ca94ab54f8231405cb22ca27f3730e3c3c8d466f66a809e72"
+      },
+      {
+        "bytes": 7726,
+        "path": "fixtures/source/fixed/lua/sliding_window_reserve.lua",
+        "sha256": "53169c4b77de83471fa12f63d3f90336651b5aaee8872606ee16b00ad606187d"
+      },
+      {
+        "bytes": 3018,
+        "path": "fixtures/source/fixed/lua/token_bucket_reconcile.lua",
+        "sha256": "784f678630243394932c71a7e31faa29c0d8fdb8db3428e130ccd6d727e36a9f"
+      },
+      {
+        "bytes": 6160,
+        "path": "fixtures/source/fixed/lua/token_bucket_reserve.lua",
+        "sha256": "51e15a5d1afe15d17c6dbe02b3828b0a3d856559f41bd95abc4bc9d0d792d3f6"
+      },
+      {
+        "bytes": 85639,
+        "path": "fixtures/source/fixed/mod.rs",
+        "sha256": "6f901b4bf06db9c90a69d4f2f81fee808257158940bb5057541681014503bc5c"
+      },
+      {
+        "bytes": 7111,
+        "path": "fixtures/source/manifest.json",
+        "sha256": "7d1d1ecc2cd7a0f98b6fa326a0e22107275444127fe90389419177a91b91ff99"
+      },
+      {
+        "bytes": 14864,
+        "path": "fixtures/source/plain/connection.rs",
+        "sha256": "8790ee651f1b507b4b13fac7101281654abc0708482cf34e46c913601bd28a19"
+      },
+      {
+        "bytes": 6853,
+        "path": "fixtures/source/plain/mod.rs",
+        "sha256": "af39dbd25366b65cc830129a4a39321a91d060e5e697408ceab60770f39a6a92"
+      },
+      {
+        "bytes": 43146,
+        "path": "fixtures/source/plain/sliding_window.rs",
+        "sha256": "96ace328f13272e70386a26f4e579d813550f05aa7e8f9ebd5e0b394b4d6e724"
+      },
+      {
+        "bytes": 50200,
+        "path": "fixtures/source/plain/token_bucket.rs",
+        "sha256": "2aed3bb2672702639686fb2fa346d0349c24003f01f39b63780deaa0f90c6983"
+      },
+      {
+        "bytes": 25946,
+        "path": "scripts/build_repaired_report.py",
+        "sha256": "402c69cd24f55d4dd932d85d65e939ef9967a03cfc46b92a919ba35ebd22e273"
+      },
+      {
+        "bytes": 34988,
+        "path": "scripts/build_report.py",
+        "sha256": "2cc391adef9387e48863b23e1e592db04a6406015f1aedcdffa8ce345056a06c"
+      },
+      {
+        "bytes": 5667,
+        "path": "scripts/capture_environment.py",
+        "sha256": "d8eed89d024d24b1cb3c18ef7446e901415ca549601c6223cf18215bc1b44f3c"
+      },
+      {
+        "bytes": 4738,
+        "path": "scripts/fetch_sources.py",
+        "sha256": "d28bc624a453b424f1ea30d520df1941d2ce77c78c81e57baae39f58a39e0341"
+      },
+      {
+        "bytes": 7664,
+        "path": "scripts/reproduce-v0.4.1-mixed-config-overadmission.sh",
+        "sha256": "8890ec562af99af676a720183ce4caabcaabb6436084992017a4cf961a078a43"
+      },
+      {
+        "bytes": 2914,
+        "path": "scripts/reproduce_mixed_config_bug.sh",
+        "sha256": "3555ae7f7f3fda9338818b12cb93949b377ab058c6002e84f5fb12129fef598b"
+      },
+      {
+        "bytes": 2685,
+        "path": "scripts/run_redis_gate.sh",
+        "sha256": "a7979551ebd9fa3bba1236ac98ed5ba4ebbef35362c59e5c4c8f93b34b6c7e7a"
+      },
+      {
+        "bytes": 5706,
+        "path": "scripts/run_repaired_gate.sh",
+        "sha256": "0c456e06f1767416e4a99d5ba65ce55aadbeab41e4a00929650d7b5be80f8ac7"
+      },
+      {
+        "bytes": 2994,
+        "path": "scripts/run_valkey_gate.sh",
+        "sha256": "07131754b203eb6097bc0208400b917c80f46b5b64b1960ccb808fcd6a4f106e"
+      },
+      {
+        "bytes": 620,
+        "path": "scripts/start_redis_cluster.sh",
+        "sha256": "213ce5845a2d8bdd6f681637ade9dc1aeb18884e3243c5708007e1f8297fa519"
+      },
+      {
+        "bytes": 1910,
+        "path": "scripts/start_sentinel_topology.sh",
+        "sha256": "16aa78895046d756607d9e5e7d33a2487472ce1b6ac89fe74281835e389742fa"
+      },
+      {
+        "bytes": 644,
+        "path": "scripts/start_valkey_cluster.sh",
+        "sha256": "6b8a2b16f2bd1a6df2e7cea5e8d3faa01083e1c908391a25b681bc04c7e5dddc"
+      },
+      {
+        "bytes": 18949,
+        "path": "src/cluster_negative.rs",
+        "sha256": "474c2189c189f0f4e5fc99037cc923c6f7884c4f55bdd0ef1190f67445b5c62f"
+      },
+      {
+        "bytes": 46578,
+        "path": "src/fixed.rs",
+        "sha256": "60422612ca0ca7a6bddf22adbf32454c11418db29ac72202e75fa52b20b91192"
+      },
+      {
+        "bytes": 7910,
+        "path": "src/key_schema.rs",
+        "sha256": "17450406da4563410bce45b0bd63c580d8267e0f30e376271e944bdb72c8e534"
+      },
+      {
+        "bytes": 6299,
+        "path": "src/main.rs",
+        "sha256": "f55005e878c0f498cb316aa138a59db029e884a82fef63431f30026b04e557f2"
+      },
+      {
+        "bytes": 35681,
+        "path": "src/runtime.rs",
+        "sha256": "d55527aaef8c2f61cc409e05a0efeed34a934f384656ec084833453873d1f108"
+      },
+      {
+        "bytes": 44526,
+        "path": "src/sentinel.rs",
+        "sha256": "e6574085b29d45ae49bd749bad4e76ca73dd73318a63d23960676d8b9ba88536"
+      },
+      {
+        "bytes": 14847,
+        "path": "src/static_audit.rs",
+        "sha256": "76fe875b072a5ffbe5a969d2fb61655d0ec8970fc637583b2d9a60c3120b1f0d"
+      }
+    ],
+    "tree_sha256": "12a0e96d8f2cba748bcd7d0b55480da42da959ee18dc41c079efda9f350013f0",
+    "version_control": "local_unpublished_directory"
+  },
+  "host": {
+    "architecture": "arm64",
+    "hostname_retained": false,
+    "logical_cpus": 12,
+    "release": "27.0.0",
+    "system": "Darwin"
+  },
+  "images": {
+    "red_hat_valkey": {
+      "architecture": "arm64",
+      "available": true,
+      "created": "2026-09-24T07:57:47.76705522Z",
+      "image_id": "5783f401d0e72eac210a39f3026a7fb933583bd4e273daa51b14a5290f7123f4",
+      "manifest_type": "application/vnd.oci.image.manifest.v1+json",
+      "original_declared_reference": "registry.access.redhat.com/rhel10/valkey-8@sha256:5929be16ac020c4851d8dc1f5ead6d48c6da066a9a74349711186925ebd553b9",
+      "os": "linux",
+      "registry_correction": "terms-gated rhel10 repository is served from authenticated registry.redhat.io; manifest digest unchanged",
+      "repo_digests": [
+        "registry.redhat.io/rhel10/valkey-8@sha256:16dcbd01b2fbe8d810fbd4f2d12ade3eb3bef554ee729ec74dce502822d0b8a2",
+        "registry.redhat.io/rhel10/valkey-8@sha256:5929be16ac020c4851d8dc1f5ead6d48c6da066a9a74349711186925ebd553b9"
+      ],
+      "requested_manifest_digest": "sha256:5929be16ac020c4851d8dc1f5ead6d48c6da066a9a74349711186925ebd553b9",
+      "requested_reference": "registry.redhat.io/rhel10/valkey-8@sha256:5929be16ac020c4851d8dc1f5ead6d48c6da066a9a74349711186925ebd553b9",
+      "version_label": null
+    },
+    "redis": {
+      "architecture": "arm64",
+      "available": true,
+      "created": "2026-09-21T17:37:05.096186658Z",
+      "image_id": "675f7644831d85995868250485bf7a71970257f74da31c62969a868d3f3eff2e",
+      "manifest_type": "application/vnd.oci.image.manifest.v1+json",
+      "os": "linux",
+      "repo_digests": [
+        "docker.io/library/redis@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0",
+        "docker.io/library/redis@sha256:41a10b18bd238fa7837b1615b2b5b113edff1654233238ac82d87e6fb5531f44"
+      ],
+      "requested_manifest_digest": "sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0",
+      "requested_reference": "docker.io/library/redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0",
+      "version_label": "8.10.2-alpine"
+    }
+  },
+  "preflight_registry_diagnostics": {
+    "declared_registry": "runtime/valkey-preflight-declared-registry.txt",
+    "stale_default_auth": "runtime/valkey-preflight-default-auth.txt"
+  },
+  "purpose": "local functional evidence only; no dedicated-hardware performance claim",
+  "resolved_dependency": {
+    "checksum": "2acbc41a996f7652b2ddd9dfd98cc4ff602cfd742ae35382f07f608405ab50ed",
+    "crate": "redis",
+    "features": [
+      "tokio-comp",
+      "sentinel",
+      "cluster-async",
+      "script"
+    ],
+    "version": "1.7.0"
+  },
+  "schema_version": 1,
+  "toolchain": {
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05) (Homebrew)",
+    "podman": "podman version 5.8.3",
+    "python": "3.14.6",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew)"
+  }
+}

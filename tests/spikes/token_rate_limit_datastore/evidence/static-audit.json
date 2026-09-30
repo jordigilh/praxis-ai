@@ -1,0 +1,489 @@
+{
+  "schema_version": 1,
+  "source_manifest": {
+    "baseline_commit": "56af0e37e4bda2f06c7e33546db66a8d01fce0b7",
+    "plain_candidate_commit": "3ad8d12d6ad7014f7f632ba3468f74f8de13ce77",
+    "schema_version": 1,
+    "sources": [
+      {
+        "bytes": 174284,
+        "path": "baseline/Cargo.lock",
+        "sha256": "d73d2345cb723cab5b06fa135e797825012d8f00102c9992bfd867dad5b07f6f",
+        "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/Cargo.lock"
+      },
+      {
+        "bytes": 11799,
+        "path": "baseline/Cargo.toml",
+        "sha256": "b42fb07efa71465b9316e6f7e3f0be0826d81da744f416d7c577c5a63b68f389",
+        "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/Cargo.toml"
+      },
+      {
+        "bytes": 97476,
+        "path": "baseline/backend.rs",
+        "sha256": "bef06c8e5d03680c972b7162891bd65a2ae6a500edf5a9ad03ea988e86bcecc6",
+        "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/filters/src/token_rate_limit/backend.rs"
+      },
+      {
+        "bytes": 26786,
+        "path": "baseline/config.rs",
+        "sha256": "ff7d11b9a13c710dba9e31daf3d7616050820579a73313d8b906be2d5305004b",
+        "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/filters/src/token_rate_limit/config.rs"
+      },
+      {
+        "bytes": 2296,
+        "path": "baseline/lua/sliding_window_reconcile.lua",
+        "sha256": "3fc7237c0b5cbd1a0cfff9d80eb36af74d0afb3af856516d011f5a0e26f4022b",
+        "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/filters/src/token_rate_limit/lua/sliding_window_reconcile.lua"
+      },
+      {
+        "bytes": 7067,
+        "path": "baseline/lua/sliding_window_reserve.lua",
+        "sha256": "0662b83684add7eb839842d97c86f686ffa9c3a4f560b2eb4a719cf366787731",
+        "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/filters/src/token_rate_limit/lua/sliding_window_reserve.lua"
+      },
+      {
+        "bytes": 2381,
+        "path": "baseline/lua/token_bucket_reconcile.lua",
+        "sha256": "3a245dc656ae17c79f58a604cd19c11c119fd466243d15b0c85d7414c8b72980",
+        "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/filters/src/token_rate_limit/lua/token_bucket_reconcile.lua"
+      },
+      {
+        "bytes": 5529,
+        "path": "baseline/lua/token_bucket_reserve.lua",
+        "sha256": "1e71f86a609d36ee569825a96bda21ed6c0dfae9e226866b12d581608090cb0b",
+        "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/filters/src/token_rate_limit/lua/token_bucket_reserve.lua"
+      },
+      {
+        "bytes": 82777,
+        "path": "baseline/mod.rs",
+        "sha256": "ff979a6c58ddd62e4ebf200d35d7d70ba0cd8c65b5f8be0c0c38329838a3a1c1",
+        "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/filters/src/token_rate_limit/mod.rs"
+      },
+      {
+        "bytes": 14864,
+        "path": "plain/connection.rs",
+        "sha256": "8790ee651f1b507b4b13fac7101281654abc0708482cf34e46c913601bd28a19",
+        "url": "https://raw.githubusercontent.com/szedan-rh/ai/3ad8d12d6ad7014f7f632ba3468f74f8de13ce77/filters/src/token_rate_limit/valkey/connection.rs"
+      },
+      {
+        "bytes": 6853,
+        "path": "plain/mod.rs",
+        "sha256": "af39dbd25366b65cc830129a4a39321a91d060e5e697408ceab60770f39a6a92",
+        "url": "https://raw.githubusercontent.com/szedan-rh/ai/3ad8d12d6ad7014f7f632ba3468f74f8de13ce77/filters/src/token_rate_limit/valkey/mod.rs"
+      },
+      {
+        "bytes": 43146,
+        "path": "plain/sliding_window.rs",
+        "sha256": "96ace328f13272e70386a26f4e579d813550f05aa7e8f9ebd5e0b394b4d6e724",
+        "url": "https://raw.githubusercontent.com/szedan-rh/ai/3ad8d12d6ad7014f7f632ba3468f74f8de13ce77/filters/src/token_rate_limit/valkey/sliding_window.rs"
+      },
+      {
+        "bytes": 50200,
+        "path": "plain/token_bucket.rs",
+        "sha256": "2aed3bb2672702639686fb2fa346d0349c24003f01f39b63780deaa0f90c6983",
+        "url": "https://raw.githubusercontent.com/szedan-rh/ai/3ad8d12d6ad7014f7f632ba3468f74f8de13ce77/filters/src/token_rate_limit/valkey/token_bucket.rs"
+      }
+    ]
+  },
+  "baseline_redis_dependency": "redis = { version = \"1.7.0\", default-features = false, features = [\"tokio-comp\"] }",
+  "lua_commands": {
+    "sliding_window_reconcile": [
+      "GET",
+      "HDEL",
+      "HGET",
+      "HSET",
+      "INCRBY",
+      "PEXPIRE",
+      "SET",
+      "TIME",
+      "ZADD",
+      "ZCARD",
+      "ZREM",
+      "ZSCORE"
+    ],
+    "sliding_window_reserve": [
+      "GET",
+      "HDEL",
+      "HGET",
+      "HGETALL",
+      "HSET",
+      "INCR",
+      "INCRBY",
+      "PEXPIRE",
+      "SET",
+      "TIME",
+      "ZADD",
+      "ZCARD",
+      "ZRANGE",
+      "ZREM",
+      "ZREMRANGEBYSCORE",
+      "ZSCORE"
+    ],
+    "token_bucket_reconcile": [
+      "GET",
+      "HDEL",
+      "HGET",
+      "HMGET",
+      "HSET",
+      "INCRBY",
+      "PEXPIRE",
+      "SET",
+      "TIME",
+      "ZCARD",
+      "ZREM",
+      "ZSCORE"
+    ],
+    "token_bucket_reserve": [
+      "EXISTS",
+      "GET",
+      "HDEL",
+      "HGET",
+      "HMGET",
+      "HSET",
+      "INCR",
+      "INCRBY",
+      "PEXPIRE",
+      "SET",
+      "TIME",
+      "ZADD",
+      "ZCARD",
+      "ZRANGE",
+      "ZREM",
+      "ZREMRANGEBYSCORE",
+      "ZSCORE"
+    ]
+  },
+  "lua_dynamic_key_access": {
+    "sliding_window_reconcile": [],
+    "sliding_window_reserve": [
+      "39: local value = redis.call('HGET', active_key, reservation)",
+      "44: redis.call('ZADD', physical .. ':settled', reserved_at, 'expired:' .. reservation .. ':' .. amount)",
+      "45: redis.call('HDEL', active_key, reservation)",
+      "63: local value = redis.call('HGET', active_key, reservation)",
+      "68: redis.call('ZADD', physical .. ':settled', reserved_at, 'expired:' .. reservation .. ':' .. amount)",
+      "69: redis.call('HDEL', active_key, reservation)"
+    ],
+    "token_bucket_reconcile": [],
+    "token_bucket_reserve": [
+      "38: if redis.call('HDEL', active_key, reservation) > 0 then",
+      "56: local value = redis.call('HGET', active_key, reservation)",
+      "58: redis.call('HDEL', active_key, reservation)"
+    ]
+  },
+  "plain_commands": {
+    "connection": [],
+    "sliding_window": [
+      "EXEC",
+      "GETDEL",
+      "INCR",
+      "INCRBY",
+      "MGET",
+      "MULTI",
+      "PEXPIRE",
+      "SET",
+      "ZADD",
+      "ZCARD",
+      "ZREM",
+      "ZREMRANGEBYSCORE",
+      "ZSCORE"
+    ],
+    "token_bucket": [
+      "DEL",
+      "EXEC",
+      "GET",
+      "HMGET",
+      "HSET",
+      "INCR",
+      "MULTI",
+      "PEXPIRE",
+      "SET",
+      "UNWATCH",
+      "WATCH",
+      "ZADD",
+      "ZCARD",
+      "ZREM",
+      "ZREMRANGEBYSCORE",
+      "ZSCORE"
+    ]
+  },
+  "plain_source_findings": [
+    {
+      "id": "plain.sliding.reconcile_split_claim_update",
+      "algorithms": [
+        "sliding_window"
+      ],
+      "assertion": "reconcile must apply a refund or overage exactly once, or not claim the reservation",
+      "observation": "GETDEL claims the reservation in one round trip; the later MULTI applies the delta. The frozen source explicitly states that a failed settle loses the delta and that a lost overage under-charges the window.",
+      "immutable_source_references": [
+        "plain/sliding_window.rs:442-468",
+        "plain/sliding_window.rs:560-577"
+      ],
+      "qualification": "fail_source_proven"
+    },
+    {
+      "id": "plain.sliding.reserve_check_write_race",
+      "algorithms": [
+        "sliding_window"
+      ],
+      "assertion": "concurrent reserves must obey an explicitly approved over-admission bound",
+      "observation": "reserve reads and decides before a separate write transaction; the frozen candidate test explicitly accepts that two 60-token reservations may both admit against capacity 100. No such weakened bound is approved for this spike.",
+      "immutable_source_references": [
+        "plain/sliding_window.rs:530-547",
+        "plain/sliding_window.rs:1035-1062"
+      ],
+      "qualification": "fail_source_proven"
+    },
+    {
+      "id": "plain.sliding.namespace_cap_race",
+      "algorithms": [
+        "sliding_window"
+      ],
+      "assertion": "concurrent distinct-key admissions must not exceed exact retained-key or active-reservation caps",
+      "observation": "namespace cap zsets are read before the later reservation transaction and are not watched, so distinct subjects can independently observe capacity and both commit.",
+      "immutable_source_references": [
+        "plain/sliding_window.rs:246-271",
+        "plain/sliding_window.rs:385-423",
+        "plain/sliding_window.rs:530-547"
+      ],
+      "qualification": "fail_source_proven"
+    },
+    {
+      "id": "plain.token_bucket.namespace_cap_race",
+      "algorithms": [
+        "token_bucket"
+      ],
+      "assertion": "concurrent distinct-key admissions must not exceed exact retained-key or active-reservation caps",
+      "observation": "WATCH covers only the subject bucket, while namespace cap zsets are read and later changed without being watched; distinct subjects therefore do not conflict.",
+      "immutable_source_references": [
+        "plain/token_bucket.rs:428-462",
+        "plain/token_bucket.rs:496-529"
+      ],
+      "qualification": "fail_source_proven"
+    },
+    {
+      "id": "plain.mixed_configuration_ttl_shortening",
+      "algorithms": [
+        "sliding_window",
+        "token_bucket"
+      ],
+      "assertion": "one writer must not shorten another writer's still-required state TTL",
+      "observation": "per-subject counter and bucket TTLs use unconditional PEXPIRE with the local writer's horizon; the shared-index NX/GT helper does not protect those keys.",
+      "immutable_source_references": [
+        "plain/mod.rs:83-91",
+        "plain/sliding_window.rs:430-439",
+        "plain/token_bucket.rs:343-363"
+      ],
+      "qualification": "fail_source_proven"
+    }
+  ],
+  "key_layouts": {
+    "plain_sliding_window_mget": {
+      "key_count": 2,
+      "distinct_slots": 2,
+      "keys": [
+        {
+          "key": "praxis:spike:v2:284abb1a44427fefec37c330b97fb1c1a0ad840cd843429bb5dfeb487b6643a0:u1000:1",
+          "slot": 9745
+        },
+        {
+          "key": "praxis:spike:v2:284abb1a44427fefec37c330b97fb1c1a0ad840cd843429bb5dfeb487b6643a0:u1000:2",
+          "slot": 5746
+        }
+      ],
+      "same_slot": false
+    },
+    "plain_sliding_window_transaction": {
+      "key_count": 4,
+      "distinct_slots": 4,
+      "keys": [
+        {
+          "key": "praxis:spike:v2:284abb1a44427fefec37c330b97fb1c1a0ad840cd843429bb5dfeb487b6643a0:u1000:1",
+          "slot": 9745
+        },
+        {
+          "key": "praxis:spike:v2:284abb1a44427fefec37c330b97fb1c1a0ad840cd843429bb5dfeb487b6643a0:r:1",
+          "slot": 7345
+        },
+        {
+          "key": "praxis:spike:v2:active",
+          "slot": 8738
+        },
+        {
+          "key": "praxis:spike:v2:keys",
+          "slot": 10188
+        }
+      ],
+      "same_slot": false
+    },
+    "plain_token_bucket_transaction": {
+      "key_count": 4,
+      "distinct_slots": 4,
+      "keys": [
+        {
+          "key": "praxis:spike:v2:tb:a280b70212be6399db6381bec68fe43c04467affd596afe55b12e3784d0eb35e",
+          "slot": 6149
+        },
+        {
+          "key": "praxis:spike:v2:tb:a280b70212be6399db6381bec68fe43c04467affd596afe55b12e3784d0eb35e:r:1",
+          "slot": 9486
+        },
+        {
+          "key": "praxis:spike:v2:tb:active",
+          "slot": 15882
+        },
+        {
+          "key": "praxis:spike:v2:tb:keys",
+          "slot": 5473
+        }
+      ],
+      "same_slot": false
+    },
+    "sliding_window": {
+      "key_count": 12,
+      "distinct_slots": 12,
+      "keys": [
+        {
+          "key": "praxis:spike:v1:284abb1a44427fefec37c330b97fb1c1a0ad840cd843429bb5dfeb487b6643a0",
+          "slot": 11569
+        },
+        {
+          "key": "praxis:spike:v1:284abb1a44427fefec37c330b97fb1c1a0ad840cd843429bb5dfeb487b6643a0:settled",
+          "slot": 12617
+        },
+        {
+          "key": "praxis:spike:v1:284abb1a44427fefec37c330b97fb1c1a0ad840cd843429bb5dfeb487b6643a0:active",
+          "slot": 14887
+        },
+        {
+          "key": "praxis:spike:keys",
+          "slot": 170
+        },
+        {
+          "key": "praxis:spike:active-count",
+          "slot": 1719
+        },
+        {
+          "key": "praxis:spike:reservation-seq",
+          "slot": 11732
+        },
+        {
+          "key": "praxis:spike:active-index",
+          "slot": 8072
+        },
+        {
+          "key": "praxis:spike:v1:rule:87219b30378f7dd66ef44ae215f186851eacacdb0083b0f73f1f2313fe6aa591:active-count",
+          "slot": 16284
+        },
+        {
+          "key": "praxis:spike:v1:rule:87219b30378f7dd66ef44ae215f186851eacacdb0083b0f73f1f2313fe6aa591:active-index",
+          "slot": 9891
+        },
+        {
+          "key": "praxis:spike:v1:rule:87219b30378f7dd66ef44ae215f186851eacacdb0083b0f73f1f2313fe6aa591:keys",
+          "slot": 5715
+        },
+        {
+          "key": "praxis:spike:v1:rule:87219b30378f7dd66ef44ae215f186851eacacdb0083b0f73f1f2313fe6aa591:balances",
+          "slot": 5943
+        },
+        {
+          "key": "praxis:spike:v1:rule:87219b30378f7dd66ef44ae215f186851eacacdb0083b0f73f1f2313fe6aa591:remaining-total",
+          "slot": 1092
+        }
+      ],
+      "same_slot": false
+    },
+    "token_bucket": {
+      "key_count": 11,
+      "distinct_slots": 11,
+      "keys": [
+        {
+          "key": "praxis:spike:v1:tb:a280b70212be6399db6381bec68fe43c04467affd596afe55b12e3784d0eb35e",
+          "slot": 14382
+        },
+        {
+          "key": "praxis:spike:v1:tb:a280b70212be6399db6381bec68fe43c04467affd596afe55b12e3784d0eb35e:active",
+          "slot": 7529
+        },
+        {
+          "key": "praxis:spike:tb:keys",
+          "slot": 14267
+        },
+        {
+          "key": "praxis:spike:tb:active-count",
+          "slot": 2153
+        },
+        {
+          "key": "praxis:spike:tb:reservation-seq",
+          "slot": 253
+        },
+        {
+          "key": "praxis:spike:tb:active-index",
+          "slot": 4438
+        },
+        {
+          "key": "praxis:spike:v1:tb:rule:670287b15c627f9d7261843149f7b724284caced2ddb9f174fb148a0f880b6f7:active-count",
+          "slot": 1463
+        },
+        {
+          "key": "praxis:spike:v1:tb:rule:670287b15c627f9d7261843149f7b724284caced2ddb9f174fb148a0f880b6f7:active-index",
+          "slot": 7304
+        },
+        {
+          "key": "praxis:spike:v1:tb:rule:670287b15c627f9d7261843149f7b724284caced2ddb9f174fb148a0f880b6f7:keys",
+          "slot": 9393
+        },
+        {
+          "key": "praxis:spike:v1:tb:rule:670287b15c627f9d7261843149f7b724284caced2ddb9f174fb148a0f880b6f7:balances",
+          "slot": 11075
+        },
+        {
+          "key": "praxis:spike:v1:tb:rule:670287b15c627f9d7261843149f7b724284caced2ddb9f174fb148a0f880b6f7:remaining-total",
+          "slot": 10086
+        }
+      ],
+      "same_slot": false
+    }
+  },
+  "native_cluster_contract": {
+    "unchanged_contract_satisfiable": false,
+    "conclusion": "Exact rule- or namespace-wide caps, a shared reservation sequence, and atomic aggregate telemetry cannot coexist with cross-primary subject distribution in one Redis/Valkey Cluster atomic operation.",
+    "proof": [
+      "Every key touched by one script, WATCH transaction, or atomic multi-key command must occupy one Cluster slot.",
+      "An exact aggregate cap must be checked and incremented atomically with each admitted subject; therefore its shared key must occupy the same slot as every subject state it governs.",
+      "Two subject states on different primary-owned slots cannot both share one slot with the same aggregate key; co-locating all subjects satisfies atomicity but fails the required sharding distribution assertion.",
+      "Splitting caps, IDs, cleanup, or telemetry by slot changes their scope; coordinating them across slots adds a Praxis coordination layer and ambiguous partial-commit states."
+    ],
+    "per_subject_same_slot_example": {
+      "key_count": 3,
+      "distinct_slots": 1,
+      "keys": [
+        {
+          "key": "praxis:spike:v3:{284abb1a44427fefec37c330b97fb1c1a0ad840cd843429bb5dfeb487b6643a0}:state",
+          "slot": 1203
+        },
+        {
+          "key": "praxis:spike:v3:{284abb1a44427fefec37c330b97fb1c1a0ad840cd843429bb5dfeb487b6643a0}:active",
+          "slot": 1203
+        },
+        {
+          "key": "praxis:spike:v3:{284abb1a44427fefec37c330b97fb1c1a0ad840cd843429bb5dfeb487b6643a0}:settled",
+          "slot": 1203
+        }
+      ],
+      "same_slot": true
+    },
+    "representative_subject_count": 256,
+    "representative_distinct_slot_count": 255,
+    "contract_preserving_options": [
+      "keep the backend standalone or Sentinel HA-only",
+      "obtain explicit product approval to remove or redefine aggregate semantics, then version a new Cluster candidate"
+    ],
+    "non_qualifying_options": [
+      "co-locate the whole namespace in one hash slot",
+      "use per-shard caps or IDs without an approved contract change",
+      "add Praxis shard maps, routing, coordination, or rebalancing",
+      "layer Sentinel over shards"
+    ]
+  }
+}

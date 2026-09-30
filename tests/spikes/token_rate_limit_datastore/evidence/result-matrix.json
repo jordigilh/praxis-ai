@@ -1,0 +1,2224 @@
+{
+  "allowed_result_states": [
+    "blocked_by_correctness_gate",
+    "fail",
+    "not_applicable",
+    "pass",
+    "unsupported"
+  ],
+  "architectural_performance_cells": [
+    {
+      "assertion": "standalone and cached Sentinel-primary steady state issue the same one scripted mutation round trip; Sentinel discovery occurs only on initial connection or invalidation",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-fixed-standalone.json",
+        "runtime/redis-8.10.2-sentinel-eval.json"
+      ],
+      "id": "round_trip_parity.mixed_configuration_repair_eval.redis_8_10_2",
+      "product": "redis_8_10_2",
+      "state": "pass"
+    },
+    {
+      "assertion": "standalone and cached Sentinel-primary steady state issue the same one scripted mutation round trip; Sentinel discovery occurs only on initial connection or invalidation",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-fixed-standalone.json",
+        "runtime/red-hat-valkey-8.0.11-sentinel-eval.json"
+      ],
+      "id": "round_trip_parity.mixed_configuration_repair_eval.red_hat_valkey_8_0_11",
+      "product": "red_hat_valkey_8_0_11",
+      "state": "pass"
+    },
+    {
+      "assertion": "standalone and cached Sentinel-primary steady state issue the same one scripted mutation round trip; Sentinel discovery occurs only on initial connection or invalidation",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-fixed-standalone.json",
+        "runtime/redis-8.10.2-sentinel-evalsha.json"
+      ],
+      "id": "round_trip_parity.mixed_configuration_repair_evalsha.redis_8_10_2",
+      "product": "redis_8_10_2",
+      "state": "pass"
+    },
+    {
+      "assertion": "standalone and cached Sentinel-primary steady state issue the same one scripted mutation round trip; Sentinel discovery occurs only on initial connection or invalidation",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-fixed-standalone.json",
+        "runtime/red-hat-valkey-8.0.11-sentinel-evalsha.json"
+      ],
+      "id": "round_trip_parity.mixed_configuration_repair_evalsha.red_hat_valkey_8_0_11",
+      "product": "red_hat_valkey_8_0_11",
+      "state": "pass"
+    }
+  ],
+  "candidate_descriptions": {
+    "current_eval": "Frozen upstream Lua invoked with EVAL",
+    "mixed_configuration_repair_eval": "Mixed-configuration repair at b6fe4704 invoked with EVAL",
+    "mixed_configuration_repair_evalsha": "Mixed-configuration repair at b6fe4704 invoked with redis::Script/EVALSHA",
+    "plain_pr_1380": "Frozen PR #1380 plain-command design",
+    "proposed_evalsha": "Identical frozen Lua invoked through redis::Script/EVALSHA"
+  },
+  "correctness_and_topology_cells": [
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": null,
+      "id": "current_eval.sliding_window.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "the frozen implementation let a short-window writer delete history still required by a long-window writer and then over-admit",
+      "state": "fail",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "current_eval.sliding_window.redis_8_10_2.standalone",
+      "id": "current_eval.sliding_window.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed current_eval.sliding_window.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "current_eval.sliding_window.redis_8_10_2.standalone",
+      "id": "current_eval.sliding_window.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed current_eval.sliding_window.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "current_eval.sliding_window.redis_8_10_2.standalone",
+      "id": "current_eval.sliding_window.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed current_eval.sliding_window.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": null,
+      "id": "current_eval.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen implementation let a short-window writer delete history still required by a long-window writer and then over-admit",
+      "state": "fail",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "current_eval.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "id": "current_eval.sliding_window.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed current_eval.sliding_window.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "current_eval.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "id": "current_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed current_eval.sliding_window.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "current_eval.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "id": "current_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed current_eval.sliding_window.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": null,
+      "id": "current_eval.token_bucket.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "the frozen implementation let a fast-refill writer shorten depleted state and restore a slow-refill bucket to full capacity early",
+      "state": "fail",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "current_eval.token_bucket.redis_8_10_2.standalone",
+      "id": "current_eval.token_bucket.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed current_eval.token_bucket.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "current_eval.token_bucket.redis_8_10_2.standalone",
+      "id": "current_eval.token_bucket.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed current_eval.token_bucket.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "current_eval.token_bucket.redis_8_10_2.standalone",
+      "id": "current_eval.token_bucket.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed current_eval.token_bucket.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": null,
+      "id": "current_eval.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen implementation let a fast-refill writer shorten depleted state and restore a slow-refill bucket to full capacity early",
+      "state": "fail",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "current_eval.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "id": "current_eval.token_bucket.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed current_eval.token_bucket.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "current_eval.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "id": "current_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed current_eval.token_bucket.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "current_eval.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "id": "current_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed current_eval.token_bucket.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": null,
+      "id": "proposed_evalsha.sliding_window.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "the frozen implementation let a short-window writer delete history still required by a long-window writer and then over-admit",
+      "state": "fail",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "proposed_evalsha.sliding_window.redis_8_10_2.standalone",
+      "id": "proposed_evalsha.sliding_window.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed proposed_evalsha.sliding_window.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "proposed_evalsha.sliding_window.redis_8_10_2.standalone",
+      "id": "proposed_evalsha.sliding_window.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed proposed_evalsha.sliding_window.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "proposed_evalsha.sliding_window.redis_8_10_2.standalone",
+      "id": "proposed_evalsha.sliding_window.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed proposed_evalsha.sliding_window.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": null,
+      "id": "proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen implementation let a short-window writer delete history still required by a long-window writer and then over-admit",
+      "state": "fail",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "id": "proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "id": "proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "id": "proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": null,
+      "id": "proposed_evalsha.token_bucket.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "the frozen implementation let a fast-refill writer shorten depleted state and restore a slow-refill bucket to full capacity early",
+      "state": "fail",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "proposed_evalsha.token_bucket.redis_8_10_2.standalone",
+      "id": "proposed_evalsha.token_bucket.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed proposed_evalsha.token_bucket.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "proposed_evalsha.token_bucket.redis_8_10_2.standalone",
+      "id": "proposed_evalsha.token_bucket.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed proposed_evalsha.token_bucket.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "proposed_evalsha.token_bucket.redis_8_10_2.standalone",
+      "id": "proposed_evalsha.token_bucket.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed proposed_evalsha.token_bucket.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": null,
+      "id": "proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen implementation let a fast-refill writer shorten depleted state and restore a slow-refill bucket to full capacity early",
+      "state": "fail",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "id": "proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "id": "proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "id": "proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": null,
+      "id": "plain_pr_1380.sliding_window.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "the frozen source admits concurrent overrun, races namespace caps, can shorten per-subject TTLs, and can lose a claimed settlement delta after GETDEL",
+      "state": "fail",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.sliding_window.redis_8_10_2.standalone",
+      "id": "plain_pr_1380.sliding_window.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed plain_pr_1380.sliding_window.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.sliding_window.redis_8_10_2.standalone",
+      "id": "plain_pr_1380.sliding_window.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed plain_pr_1380.sliding_window.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.sliding_window.redis_8_10_2.standalone",
+      "id": "plain_pr_1380.sliding_window.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed plain_pr_1380.sliding_window.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": null,
+      "id": "plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen source admits concurrent overrun, races namespace caps, can shorten per-subject TTLs, and can lose a claimed settlement delta after GETDEL",
+      "state": "fail",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "id": "plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "id": "plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "id": "plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": null,
+      "id": "plain_pr_1380.token_bucket.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "the frozen source watches only the subject bucket while racing namespace caps and uses a local-writer PEXPIRE that can shorten required state",
+      "state": "fail",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.token_bucket.redis_8_10_2.standalone",
+      "id": "plain_pr_1380.token_bucket.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed plain_pr_1380.token_bucket.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.token_bucket.redis_8_10_2.standalone",
+      "id": "plain_pr_1380.token_bucket.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed plain_pr_1380.token_bucket.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.token_bucket.redis_8_10_2.standalone",
+      "id": "plain_pr_1380.token_bucket.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "the frozen candidate failed plain_pr_1380.token_bucket.redis_8_10_2.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": null,
+      "id": "plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen source watches only the subject bucket while racing namespace caps and uses a local-writer PEXPIRE that can shorten required state",
+      "state": "fail",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "id": "plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "id": "plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "id": "plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the frozen candidate failed plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.standalone; later topology execution was non-qualifying",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.sliding_window.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": null,
+      "state": "pass",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-sentinel-eval.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.sliding_window.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": null,
+      "state": "pass",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.sliding_window.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.sliding_window.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": null,
+      "state": "pass",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-sentinel-eval.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.sliding_window.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": null,
+      "state": "pass",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.token_bucket.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": null,
+      "state": "pass",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-sentinel-eval.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.token_bucket.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": null,
+      "state": "pass",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.token_bucket.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.token_bucket.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": null,
+      "state": "pass",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-sentinel-eval.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.token_bucket.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": null,
+      "state": "pass",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.sliding_window.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": null,
+      "state": "pass",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-sentinel-evalsha.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.sliding_window.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": null,
+      "state": "pass",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.sliding_window.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.sliding_window.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": null,
+      "state": "pass",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-sentinel-evalsha.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.sliding_window.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": null,
+      "state": "pass",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.token_bucket.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": null,
+      "state": "pass",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-sentinel-evalsha.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.token_bucket.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": null,
+      "state": "pass",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.token_bucket.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.token_bucket.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": null,
+      "state": "pass",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-sentinel-evalsha.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.token_bucket.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": null,
+      "state": "pass",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": null,
+      "id": "mixed_configuration_repair_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "the unchanged exact aggregate caps, reservation IDs, cleanup, and telemetry contract cannot both share one atomic slot and distribute independent subjects across native Cluster primaries",
+      "state": "unsupported",
+      "topology": "cluster_sharding_ha"
+    }
+  ],
+  "decisions": {
+    "historical_current_eval": "no_go_frozen_revision",
+    "historical_plain_pr_1380": "no_go_frozen_revision",
+    "historical_proposed_evalsha": "no_go_frozen_revision",
+    "mixed_configuration_repair_eval": "go_standalone_and_sentinel_both_products",
+    "mixed_configuration_repair_evalsha": "correctness_go_standalone_and_sentinel_both_products",
+    "numeric_dedicated_hardware_performance": "not_claimed",
+    "production_invocation": "eval",
+    "redis_native_cluster_unchanged_contract": "no_go",
+    "sentinel_equal_support_under_exact_digests": "go",
+    "standalone_equal_support_under_exact_digests": "go",
+    "steady_state_round_trip_parity": "pass",
+    "valkey_native_cluster_unchanged_contract": "no_go"
+  },
+  "diagnostic_cells": [
+    {
+      "evidence": [
+        "static-audit.json"
+      ],
+      "id": "native_cluster.unchanged_aggregate_contract",
+      "reason": "Exact rule- or namespace-wide caps, a shared reservation sequence, and atomic aggregate telemetry cannot coexist with cross-primary subject distribution in one Redis/Valkey Cluster atomic operation.",
+      "state": "unsupported"
+    }
+  ],
+  "performance_cells": [
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "current_eval.sliding_window.redis_8_10_2.standalone",
+      "id": "performance.current_eval.sliding_window.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell current_eval.sliding_window.redis_8_10_2.standalone did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "current_eval.sliding_window.redis_8_10_2.sentinel_ha",
+      "id": "performance.current_eval.sliding_window.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell current_eval.sliding_window.redis_8_10_2.sentinel_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "current_eval.sliding_window.redis_8_10_2.cluster_sharding",
+      "id": "performance.current_eval.sliding_window.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell current_eval.sliding_window.redis_8_10_2.cluster_sharding did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "current_eval.sliding_window.redis_8_10_2.cluster_sharding_ha",
+      "id": "performance.current_eval.sliding_window.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell current_eval.sliding_window.redis_8_10_2.cluster_sharding_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "current_eval.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "id": "performance.current_eval.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell current_eval.sliding_window.red_hat_valkey_8_0_11.standalone did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "current_eval.sliding_window.red_hat_valkey_8_0_11.sentinel_ha",
+      "id": "performance.current_eval.sliding_window.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell current_eval.sliding_window.red_hat_valkey_8_0_11.sentinel_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "current_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding",
+      "id": "performance.current_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell current_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "current_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "id": "performance.current_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell current_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "current_eval.token_bucket.redis_8_10_2.standalone",
+      "id": "performance.current_eval.token_bucket.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell current_eval.token_bucket.redis_8_10_2.standalone did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "current_eval.token_bucket.redis_8_10_2.sentinel_ha",
+      "id": "performance.current_eval.token_bucket.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell current_eval.token_bucket.redis_8_10_2.sentinel_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "current_eval.token_bucket.redis_8_10_2.cluster_sharding",
+      "id": "performance.current_eval.token_bucket.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell current_eval.token_bucket.redis_8_10_2.cluster_sharding did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "current_eval.token_bucket.redis_8_10_2.cluster_sharding_ha",
+      "id": "performance.current_eval.token_bucket.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell current_eval.token_bucket.redis_8_10_2.cluster_sharding_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "current_eval.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "id": "performance.current_eval.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell current_eval.token_bucket.red_hat_valkey_8_0_11.standalone did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "current_eval.token_bucket.red_hat_valkey_8_0_11.sentinel_ha",
+      "id": "performance.current_eval.token_bucket.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell current_eval.token_bucket.red_hat_valkey_8_0_11.sentinel_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "current_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding",
+      "id": "performance.current_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell current_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "current_eval",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "current_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "id": "performance.current_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell current_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "proposed_evalsha.sliding_window.redis_8_10_2.standalone",
+      "id": "performance.proposed_evalsha.sliding_window.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.sliding_window.redis_8_10_2.standalone did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "proposed_evalsha.sliding_window.redis_8_10_2.sentinel_ha",
+      "id": "performance.proposed_evalsha.sliding_window.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.sliding_window.redis_8_10_2.sentinel_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "proposed_evalsha.sliding_window.redis_8_10_2.cluster_sharding",
+      "id": "performance.proposed_evalsha.sliding_window.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.sliding_window.redis_8_10_2.cluster_sharding did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "proposed_evalsha.sliding_window.redis_8_10_2.cluster_sharding_ha",
+      "id": "performance.proposed_evalsha.sliding_window.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.sliding_window.redis_8_10_2.cluster_sharding_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "id": "performance.proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.standalone did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.sentinel_ha",
+      "id": "performance.proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.sentinel_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding",
+      "id": "performance.proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "id": "performance.proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "proposed_evalsha.token_bucket.redis_8_10_2.standalone",
+      "id": "performance.proposed_evalsha.token_bucket.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.token_bucket.redis_8_10_2.standalone did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "proposed_evalsha.token_bucket.redis_8_10_2.sentinel_ha",
+      "id": "performance.proposed_evalsha.token_bucket.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.token_bucket.redis_8_10_2.sentinel_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "proposed_evalsha.token_bucket.redis_8_10_2.cluster_sharding",
+      "id": "performance.proposed_evalsha.token_bucket.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.token_bucket.redis_8_10_2.cluster_sharding did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/redis-8.10.2-standalone.json"
+      ],
+      "gate": "proposed_evalsha.token_bucket.redis_8_10_2.cluster_sharding_ha",
+      "id": "performance.proposed_evalsha.token_bucket.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.token_bucket.redis_8_10_2.cluster_sharding_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "id": "performance.proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.standalone did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.sentinel_ha",
+      "id": "performance.proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.sentinel_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding",
+      "id": "performance.proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "proposed_evalsha",
+      "evidence": [
+        "runtime/red-hat-valkey-8.0.11-standalone.json"
+      ],
+      "gate": "proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "id": "performance.proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell proposed_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.sliding_window.redis_8_10_2.standalone",
+      "id": "performance.plain_pr_1380.sliding_window.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.sliding_window.redis_8_10_2.standalone did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.sliding_window.redis_8_10_2.sentinel_ha",
+      "id": "performance.plain_pr_1380.sliding_window.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.sliding_window.redis_8_10_2.sentinel_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.sliding_window.redis_8_10_2.cluster_sharding",
+      "id": "performance.plain_pr_1380.sliding_window.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.sliding_window.redis_8_10_2.cluster_sharding did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.sliding_window.redis_8_10_2.cluster_sharding_ha",
+      "id": "performance.plain_pr_1380.sliding_window.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.sliding_window.redis_8_10_2.cluster_sharding_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "id": "performance.plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.standalone did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.sentinel_ha",
+      "id": "performance.plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.sentinel_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.cluster_sharding",
+      "id": "performance.plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.cluster_sharding did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "id": "performance.plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.token_bucket.redis_8_10_2.standalone",
+      "id": "performance.plain_pr_1380.token_bucket.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.token_bucket.redis_8_10_2.standalone did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.token_bucket.redis_8_10_2.sentinel_ha",
+      "id": "performance.plain_pr_1380.token_bucket.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.token_bucket.redis_8_10_2.sentinel_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.token_bucket.redis_8_10_2.cluster_sharding",
+      "id": "performance.plain_pr_1380.token_bucket.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.token_bucket.redis_8_10_2.cluster_sharding did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.token_bucket.redis_8_10_2.cluster_sharding_ha",
+      "id": "performance.plain_pr_1380.token_bucket.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.token_bucket.redis_8_10_2.cluster_sharding_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "id": "performance.plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.standalone did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.sentinel_ha",
+      "id": "performance.plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.sentinel_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.cluster_sharding",
+      "id": "performance.plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.cluster_sharding did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "plain_pr_1380",
+      "evidence": [
+        "static-audit.json"
+      ],
+      "gate": "plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "id": "performance.plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance was prohibited after correctness cell plain_pr_1380.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha did not pass",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "environment.json",
+        "runtime/redis-8.10.2-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_eval.sliding_window.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "environment.json",
+        "runtime/redis-8.10.2-sentinel-eval.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_eval.sliding_window.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_eval.sliding_window.redis_8_10_2.cluster_sharding",
+      "id": "performance.mixed_configuration_repair_eval.sliding_window.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_eval.sliding_window.redis_8_10_2.cluster_sharding is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_eval.sliding_window.redis_8_10_2.cluster_sharding_ha",
+      "id": "performance.mixed_configuration_repair_eval.sliding_window.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_eval.sliding_window.redis_8_10_2.cluster_sharding_ha is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "environment.json",
+        "runtime/red-hat-valkey-8.0.11-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_eval.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "environment.json",
+        "runtime/red-hat-valkey-8.0.11-sentinel-eval.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_eval.sliding_window.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding",
+      "id": "performance.mixed_configuration_repair_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "id": "performance.mixed_configuration_repair_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_eval.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "environment.json",
+        "runtime/redis-8.10.2-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_eval.token_bucket.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "environment.json",
+        "runtime/redis-8.10.2-sentinel-eval.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_eval.token_bucket.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_eval.token_bucket.redis_8_10_2.cluster_sharding",
+      "id": "performance.mixed_configuration_repair_eval.token_bucket.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_eval.token_bucket.redis_8_10_2.cluster_sharding is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_eval.token_bucket.redis_8_10_2.cluster_sharding_ha",
+      "id": "performance.mixed_configuration_repair_eval.token_bucket.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_eval.token_bucket.redis_8_10_2.cluster_sharding_ha is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "environment.json",
+        "runtime/red-hat-valkey-8.0.11-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_eval.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "environment.json",
+        "runtime/red-hat-valkey-8.0.11-sentinel-eval.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_eval.token_bucket.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding",
+      "id": "performance.mixed_configuration_repair_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_eval",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "id": "performance.mixed_configuration_repair_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_eval.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "environment.json",
+        "runtime/redis-8.10.2-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_evalsha.sliding_window.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "environment.json",
+        "runtime/redis-8.10.2-sentinel-evalsha.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_evalsha.sliding_window.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_evalsha.sliding_window.redis_8_10_2.cluster_sharding",
+      "id": "performance.mixed_configuration_repair_evalsha.sliding_window.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_evalsha.sliding_window.redis_8_10_2.cluster_sharding is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_evalsha.sliding_window.redis_8_10_2.cluster_sharding_ha",
+      "id": "performance.mixed_configuration_repair_evalsha.sliding_window.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_evalsha.sliding_window.redis_8_10_2.cluster_sharding_ha is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "environment.json",
+        "runtime/red-hat-valkey-8.0.11-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_evalsha.sliding_window.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "environment.json",
+        "runtime/red-hat-valkey-8.0.11-sentinel-evalsha.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_evalsha.sliding_window.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding",
+      "id": "performance.mixed_configuration_repair_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "sliding_window",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "id": "performance.mixed_configuration_repair_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_evalsha.sliding_window.red_hat_valkey_8_0_11.cluster_sharding_ha is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "environment.json",
+        "runtime/redis-8.10.2-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_evalsha.token_bucket.redis_8_10_2.standalone",
+      "product": "redis_8_10_2",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "environment.json",
+        "runtime/redis-8.10.2-sentinel-evalsha.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_evalsha.token_bucket.redis_8_10_2.sentinel_ha",
+      "product": "redis_8_10_2",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_evalsha.token_bucket.redis_8_10_2.cluster_sharding",
+      "id": "performance.mixed_configuration_repair_evalsha.token_bucket.redis_8_10_2.cluster_sharding",
+      "product": "redis_8_10_2",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_evalsha.token_bucket.redis_8_10_2.cluster_sharding is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_evalsha.token_bucket.redis_8_10_2.cluster_sharding_ha",
+      "id": "performance.mixed_configuration_repair_evalsha.token_bucket.redis_8_10_2.cluster_sharding_ha",
+      "product": "redis_8_10_2",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_evalsha.token_bucket.redis_8_10_2.cluster_sharding_ha is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "environment.json",
+        "runtime/red-hat-valkey-8.0.11-fixed-standalone.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_evalsha.token_bucket.red_hat_valkey_8_0_11.standalone",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "standalone"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "environment.json",
+        "runtime/red-hat-valkey-8.0.11-sentinel-evalsha.json"
+      ],
+      "gate": null,
+      "id": "performance.mixed_configuration_repair_evalsha.token_bucket.red_hat_valkey_8_0_11.sentinel_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "no numeric latency/throughput qualification is claimed from this local functional host; #1421's release criterion is the separately recorded steady-state round-trip parity gate",
+      "state": "not_applicable",
+      "topology": "sentinel_ha"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding",
+      "id": "performance.mixed_configuration_repair_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding"
+    },
+    {
+      "algorithm": "token_bucket",
+      "candidate": "mixed_configuration_repair_evalsha",
+      "evidence": [
+        "static-audit.json",
+        "contract.json"
+      ],
+      "gate": "mixed_configuration_repair_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "id": "performance.mixed_configuration_repair_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha",
+      "product": "red_hat_valkey_8_0_11",
+      "reason": "performance is inapplicable because topology cell mixed_configuration_repair_evalsha.token_bucket.red_hat_valkey_8_0_11.cluster_sharding_ha is unsupported",
+      "state": "blocked_by_correctness_gate",
+      "topology": "cluster_sharding_ha"
+    }
+  ],
+  "product_descriptions": {
+    "red_hat_valkey_8_0_11": "Red Hat Valkey 8.0.11",
+    "redis_8_10_2": "Redis 8.10.2"
+  },
+  "schema_version": 2,
+  "status": "standalone_and_sentinel_correctness_qualified_performance_numeric_claim_deferred"
+}

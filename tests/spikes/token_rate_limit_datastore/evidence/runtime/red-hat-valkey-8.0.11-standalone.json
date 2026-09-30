@@ -1,0 +1,1098 @@
+{
+  "schema_version": 1,
+  "product": "red_hat_valkey",
+  "expected_version": "8.0.11",
+  "protocol": "RESP2",
+  "client": {
+    "crate_name": "redis",
+    "version": "1.7.0",
+    "checksum": "2acbc41a996f7652b2ddd9dfd98cc4ff602cfd742ae35382f07f608405ab50ed",
+    "features": [
+      "tokio-comp",
+      "sentinel",
+      "cluster-async",
+      "script"
+    ],
+    "connect_timeout_ms": 500,
+    "response_timeout_ms": 500,
+    "operation_deadline_ms": 1000,
+    "automatic_mutation_retries": 0
+  },
+  "server_identity": {
+    "arch_bits": "64",
+    "os": "Linux 7.1.10-200.fc44.aarch64 aarch64",
+    "process_id": "1",
+    "redis_version": "7.2.4",
+    "run_id": "ed76a1a9e0819153a87a8a4d2700dd37ca641030",
+    "valkey_version": "8.0.11"
+  },
+  "server_config": {
+    "appendfsync": "everysec",
+    "appendonly": "no",
+    "maxmemory": "0",
+    "maxmemory-policy": "noeviction",
+    "min-replicas-max-lag": "10",
+    "min-replicas-to-write": "0",
+    "repl-diskless-sync": "yes",
+    "save": ""
+  },
+  "candidates": [
+    {
+      "candidate": "eval",
+      "events": [
+        {
+          "name": "sliding_window.reserve.first",
+          "elapsed_us": 2266,
+          "reply": [
+            1,
+            1,
+            4,
+            4,
+            6,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reserve.first",
+            "outcome": "admitted",
+            "values": [
+              4,
+              4,
+              6,
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "first reserve admits estimate=4 with usage=4, remaining=6, active=1, keys=1"
+        },
+        {
+          "name": "sliding_window.reserve.second",
+          "elapsed_us": 675,
+          "reply": [
+            1,
+            2,
+            4,
+            8,
+            2,
+            2,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reserve.second",
+            "outcome": "admitted",
+            "values": [
+              4,
+              8,
+              2,
+              2,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "second reserve admits and leaves two tokens"
+        },
+        {
+          "name": "sliding_window.reserve.denied",
+          "elapsed_us": 464,
+          "reply": [
+            0,
+            60000,
+            2,
+            2,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reserve.denied",
+            "outcome": "denied",
+            "values": [
+              2,
+              2,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "third reserve is denied without creating another active reservation"
+        },
+        {
+          "name": "sliding_window.reconcile.refund",
+          "elapsed_us": 597,
+          "reply": [
+            1,
+            2,
+            2,
+            0,
+            4,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reconcile.refund",
+            "outcome": "applied",
+            "values": [
+              2,
+              2,
+              0,
+              4,
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "reconcile applies a two-token refund"
+        },
+        {
+          "name": "sliding_window.reconcile.duplicate",
+          "elapsed_us": 305,
+          "reply": [
+            0,
+            4,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reconcile.duplicate",
+            "outcome": "noop",
+            "values": [
+              4,
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "duplicate reconcile is a no-op"
+        },
+        {
+          "name": "sliding_window.reserve.after_refund",
+          "elapsed_us": 398,
+          "reply": [
+            1,
+            3,
+            4,
+            10,
+            0,
+            2,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reserve.after_refund",
+            "outcome": "admitted",
+            "values": [
+              4,
+              10,
+              0,
+              2,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "refund makes room for one further reservation"
+        },
+        {
+          "name": "sliding_window.reconcile.overage",
+          "elapsed_us": 482,
+          "reply": [
+            1,
+            6,
+            0,
+            2,
+            0,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reconcile.overage",
+            "outcome": "applied",
+            "values": [
+              6,
+              0,
+              2,
+              0,
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "reconcile applies a two-token overage"
+        },
+        {
+          "name": "sliding_window.reconcile.equal",
+          "elapsed_us": 600,
+          "reply": [
+            1,
+            4,
+            0,
+            0,
+            0,
+            0,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reconcile.equal",
+            "outcome": "applied",
+            "values": [
+              4,
+              0,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "equal actual usage settles the final active reservation"
+        },
+        {
+          "name": "token_bucket.reserve.first",
+          "elapsed_us": 853,
+          "reply": [
+            1,
+            1,
+            4,
+            4,
+            6,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reserve.first",
+            "outcome": "admitted",
+            "values": [
+              4,
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "first reserve admits estimate=4"
+        },
+        {
+          "name": "token_bucket.reserve.second",
+          "elapsed_us": 379,
+          "reply": [
+            1,
+            2,
+            4,
+            7,
+            2,
+            2,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reserve.second",
+            "outcome": "admitted",
+            "values": [
+              4,
+              2,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "second reserve admits and leaves approximately two whole tokens"
+        },
+        {
+          "name": "token_bucket.reserve.denied",
+          "elapsed_us": 404,
+          "reply": [
+            0,
+            19999999,
+            2,
+            2,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reserve.denied",
+            "outcome": "denied",
+            "values": [
+              2,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "third reserve is denied with a positive retry delay"
+        },
+        {
+          "name": "token_bucket.reconcile.refund",
+          "elapsed_us": 434,
+          "reply": [
+            1,
+            2,
+            2,
+            0,
+            4,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reconcile.refund",
+            "outcome": "applied",
+            "values": [
+              2,
+              2,
+              0,
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "reconcile applies a two-token refund"
+        },
+        {
+          "name": "token_bucket.reconcile.duplicate",
+          "elapsed_us": 279,
+          "reply": [
+            0,
+            4,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reconcile.duplicate",
+            "outcome": "noop",
+            "values": [
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "duplicate reconcile is a no-op"
+        },
+        {
+          "name": "token_bucket.reserve.after_refund",
+          "elapsed_us": 321,
+          "reply": [
+            1,
+            3,
+            4,
+            9,
+            0,
+            2,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reserve.after_refund",
+            "outcome": "admitted",
+            "values": [
+              4,
+              2,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "refund makes room for one further reservation"
+        },
+        {
+          "name": "token_bucket.reconcile.overage",
+          "elapsed_us": 354,
+          "reply": [
+            1,
+            6,
+            0,
+            2,
+            0,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reconcile.overage",
+            "outcome": "applied",
+            "values": [
+              6,
+              0,
+              2,
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "reconcile applies a two-token overage"
+        },
+        {
+          "name": "token_bucket.reconcile.equal",
+          "elapsed_us": 393,
+          "reply": [
+            1,
+            4,
+            0,
+            0,
+            0,
+            0,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reconcile.equal",
+            "outcome": "applied",
+            "values": [
+              4,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "equal actual usage settles the final active reservation"
+        }
+      ],
+      "invariants": [
+        {
+          "name": "sliding_window.mixed_configuration_ttl_never_shortens",
+          "assertion": "a short-window writer must not shorten state still required by a long-window writer",
+          "observed": {
+            "after_short_writer_pttl_ms": 1100,
+            "elapsed_ms": 0,
+            "key": "praxis:spike:red_hat_valkey:eval:mixed-ttl:sliding:v1:66a1515e36d1b580d138cd6438ca3df418d7e2057ea186bde92fbe62c68f1dc4:active",
+            "long_writer_pttl_ms": 12000
+          },
+          "passed": false
+        },
+        {
+          "name": "token_bucket.mixed_configuration_ttl_never_shortens",
+          "assertion": "a fast-refill writer must not shorten state still required by a slow-refill writer",
+          "observed": {
+            "after_fast_refill_writer_pttl_ms": 1100,
+            "elapsed_ms": 0,
+            "key": "praxis:spike:red_hat_valkey:eval:mixed-ttl:bucket:v1:tb:c0ae0781c25457bbc4bb6e9d8367971f61bb4728f7a1e580571deebce8218de9",
+            "slow_refill_writer_pttl_ms": 12000
+          },
+          "passed": false
+        },
+        {
+          "name": "sliding_window.mixed_configuration_preserves_long_window_history",
+          "assertion": "a short-window writer must not delete usage still enforced by a coexisting long-window writer",
+          "observed": {
+            "capacity": 5,
+            "long_window_ms": 10000,
+            "long_writer_reply_after_short_writer": [
+              1,
+              3,
+              1,
+              2,
+              3,
+              2,
+              1
+            ],
+            "settled_entries_after_short_writer": 0,
+            "settled_entries_before_short_writer": 1,
+            "short_window_ms": 10,
+            "short_writer_reply": [
+              1,
+              2,
+              1,
+              1,
+              4,
+              1,
+              1
+            ]
+          },
+          "passed": false
+        },
+        {
+          "name": "token_bucket.mixed_configuration_preserves_slow_refill_state",
+          "assertion": "a fast-refill writer must not expire a depleted slow-refill bucket and restore full capacity early",
+          "observed": {
+            "capacity": 10,
+            "fast_writer_reply": [
+              0,
+              999,
+              0,
+              0,
+              1
+            ],
+            "pttl_after_fast_writer_ms": 1100,
+            "slow_refill_tokens_per_second": 1,
+            "slow_writer_reply_after_1200ms": [
+              1,
+              2,
+              10,
+              10,
+              0,
+              1,
+              1
+            ],
+            "state_exists_after_1200ms": false
+          },
+          "passed": false
+        }
+      ],
+      "algorithm_results": [
+        {
+          "algorithm": "sliding_window",
+          "passed": false,
+          "failed_assertions": [
+            "sliding_window.mixed_configuration_ttl_never_shortens",
+            "sliding_window.mixed_configuration_preserves_long_window_history"
+          ]
+        },
+        {
+          "algorithm": "token_bucket",
+          "passed": false,
+          "failed_assertions": [
+            "token_bucket.mixed_configuration_ttl_never_shortens",
+            "token_bucket.mixed_configuration_preserves_slow_refill_state"
+          ]
+        }
+      ],
+      "command_stats": {
+        "cmdstat_eval": "calls=35,usec=4236,usec_per_call=121.03,rejected_calls=0,failed_calls=0",
+        "cmdstat_hget": "calls=50,usec=57,usec_per_call=1.14,rejected_calls=0,failed_calls=0",
+        "cmdstat_hgetall": "calls=18,usec=10,usec_per_call=0.56,rejected_calls=0,failed_calls=0",
+        "cmdstat_hset": "calls=64,usec=81,usec_per_call=1.27,rejected_calls=0,failed_calls=0",
+        "cmdstat_script|exists": "calls=2,usec=4,usec_per_call=2.00,rejected_calls=0,failed_calls=0",
+        "cmdstat_time": "calls=33,usec=24,usec_per_call=0.73,rejected_calls=0,failed_calls=0",
+        "cmdstat_zadd": "calls=68,usec=174,usec_per_call=2.56,rejected_calls=0,failed_calls=0",
+        "cmdstat_zrange": "calls=63,usec=120,usec_per_call=1.90,rejected_calls=0,failed_calls=0"
+      },
+      "scripts_present_before": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scripts_present_after": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "final_active_counts": {
+        "sliding_window": 0,
+        "token_bucket": 0
+      },
+      "passed": false
+    },
+    {
+      "candidate": "eval_sha",
+      "events": [
+        {
+          "name": "sliding_window.reserve.first",
+          "elapsed_us": 3010,
+          "reply": [
+            1,
+            1,
+            4,
+            4,
+            6,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reserve.first",
+            "outcome": "admitted",
+            "values": [
+              4,
+              4,
+              6,
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "first reserve admits estimate=4 with usage=4, remaining=6, active=1, keys=1"
+        },
+        {
+          "name": "sliding_window.reserve.second",
+          "elapsed_us": 1264,
+          "reply": [
+            1,
+            2,
+            4,
+            8,
+            2,
+            2,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reserve.second",
+            "outcome": "admitted",
+            "values": [
+              4,
+              8,
+              2,
+              2,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "second reserve admits and leaves two tokens"
+        },
+        {
+          "name": "sliding_window.reserve.denied",
+          "elapsed_us": 746,
+          "reply": [
+            0,
+            60000,
+            2,
+            2,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reserve.denied",
+            "outcome": "denied",
+            "values": [
+              2,
+              2,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "third reserve is denied without creating another active reservation"
+        },
+        {
+          "name": "sliding_window.reconcile.refund",
+          "elapsed_us": 2013,
+          "reply": [
+            1,
+            2,
+            2,
+            0,
+            4,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reconcile.refund",
+            "outcome": "applied",
+            "values": [
+              2,
+              2,
+              0,
+              4,
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "reconcile applies a two-token refund"
+        },
+        {
+          "name": "sliding_window.reconcile.duplicate",
+          "elapsed_us": 604,
+          "reply": [
+            0,
+            4,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reconcile.duplicate",
+            "outcome": "noop",
+            "values": [
+              4,
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "duplicate reconcile is a no-op"
+        },
+        {
+          "name": "sliding_window.reserve.after_refund",
+          "elapsed_us": 430,
+          "reply": [
+            1,
+            3,
+            4,
+            10,
+            0,
+            2,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reserve.after_refund",
+            "outcome": "admitted",
+            "values": [
+              4,
+              10,
+              0,
+              2,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "refund makes room for one further reservation"
+        },
+        {
+          "name": "sliding_window.reconcile.overage",
+          "elapsed_us": 517,
+          "reply": [
+            1,
+            6,
+            0,
+            2,
+            0,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reconcile.overage",
+            "outcome": "applied",
+            "values": [
+              6,
+              0,
+              2,
+              0,
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "reconcile applies a two-token overage"
+        },
+        {
+          "name": "sliding_window.reconcile.equal",
+          "elapsed_us": 339,
+          "reply": [
+            1,
+            4,
+            0,
+            0,
+            0,
+            0,
+            1
+          ],
+          "semantic": {
+            "name": "sliding_window.reconcile.equal",
+            "outcome": "applied",
+            "values": [
+              4,
+              0,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "equal actual usage settles the final active reservation"
+        },
+        {
+          "name": "token_bucket.reserve.first",
+          "elapsed_us": 1129,
+          "reply": [
+            1,
+            1,
+            4,
+            4,
+            6,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reserve.first",
+            "outcome": "admitted",
+            "values": [
+              4,
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "first reserve admits estimate=4"
+        },
+        {
+          "name": "token_bucket.reserve.second",
+          "elapsed_us": 417,
+          "reply": [
+            1,
+            2,
+            4,
+            7,
+            2,
+            2,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reserve.second",
+            "outcome": "admitted",
+            "values": [
+              4,
+              2,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "second reserve admits and leaves approximately two whole tokens"
+        },
+        {
+          "name": "token_bucket.reserve.denied",
+          "elapsed_us": 275,
+          "reply": [
+            0,
+            19999999,
+            2,
+            2,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reserve.denied",
+            "outcome": "denied",
+            "values": [
+              2,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "third reserve is denied with a positive retry delay"
+        },
+        {
+          "name": "token_bucket.reconcile.refund",
+          "elapsed_us": 1090,
+          "reply": [
+            1,
+            2,
+            2,
+            0,
+            4,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reconcile.refund",
+            "outcome": "applied",
+            "values": [
+              2,
+              2,
+              0,
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "reconcile applies a two-token refund"
+        },
+        {
+          "name": "token_bucket.reconcile.duplicate",
+          "elapsed_us": 772,
+          "reply": [
+            0,
+            4,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reconcile.duplicate",
+            "outcome": "noop",
+            "values": [
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "duplicate reconcile is a no-op"
+        },
+        {
+          "name": "token_bucket.reserve.after_refund",
+          "elapsed_us": 961,
+          "reply": [
+            1,
+            3,
+            4,
+            9,
+            0,
+            2,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reserve.after_refund",
+            "outcome": "admitted",
+            "values": [
+              4,
+              2,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "refund makes room for one further reservation"
+        },
+        {
+          "name": "token_bucket.reconcile.overage",
+          "elapsed_us": 945,
+          "reply": [
+            1,
+            6,
+            0,
+            2,
+            0,
+            1,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reconcile.overage",
+            "outcome": "applied",
+            "values": [
+              6,
+              0,
+              2,
+              1,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "reconcile applies a two-token overage"
+        },
+        {
+          "name": "token_bucket.reconcile.equal",
+          "elapsed_us": 391,
+          "reply": [
+            1,
+            4,
+            0,
+            0,
+            0,
+            0,
+            1
+          ],
+          "semantic": {
+            "name": "token_bucket.reconcile.equal",
+            "outcome": "applied",
+            "values": [
+              4,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "passed": true,
+          "assertion": "equal actual usage settles the final active reservation"
+        }
+      ],
+      "invariants": [
+        {
+          "name": "sliding_window.mixed_configuration_ttl_never_shortens",
+          "assertion": "a short-window writer must not shorten state still required by a long-window writer",
+          "observed": {
+            "after_short_writer_pttl_ms": 1100,
+            "elapsed_ms": 0,
+            "key": "praxis:spike:red_hat_valkey:evalsha:mixed-ttl:sliding:v1:cf70cb82ee33d2625e5af180db872a11efe9a1e0e0218047ed0e83ff4c832d86:active",
+            "long_writer_pttl_ms": 12000
+          },
+          "passed": false
+        },
+        {
+          "name": "token_bucket.mixed_configuration_ttl_never_shortens",
+          "assertion": "a fast-refill writer must not shorten state still required by a slow-refill writer",
+          "observed": {
+            "after_fast_refill_writer_pttl_ms": 1100,
+            "elapsed_ms": 0,
+            "key": "praxis:spike:red_hat_valkey:evalsha:mixed-ttl:bucket:v1:tb:a02758107ef8c7bbb1f05dd35d2ce522ecc412298ec107b5cc47c6cb6752bfa5",
+            "slow_refill_writer_pttl_ms": 11999
+          },
+          "passed": false
+        },
+        {
+          "name": "sliding_window.mixed_configuration_preserves_long_window_history",
+          "assertion": "a short-window writer must not delete usage still enforced by a coexisting long-window writer",
+          "observed": {
+            "capacity": 5,
+            "long_window_ms": 10000,
+            "long_writer_reply_after_short_writer": [
+              1,
+              3,
+              1,
+              2,
+              3,
+              2,
+              1
+            ],
+            "settled_entries_after_short_writer": 0,
+            "settled_entries_before_short_writer": 1,
+            "short_window_ms": 10,
+            "short_writer_reply": [
+              1,
+              2,
+              1,
+              1,
+              4,
+              1,
+              1
+            ]
+          },
+          "passed": false
+        },
+        {
+          "name": "token_bucket.mixed_configuration_preserves_slow_refill_state",
+          "assertion": "a fast-refill writer must not expire a depleted slow-refill bucket and restore full capacity early",
+          "observed": {
+            "capacity": 10,
+            "fast_writer_reply": [
+              0,
+              1000,
+              0,
+              0,
+              1
+            ],
+            "pttl_after_fast_writer_ms": 1099,
+            "slow_refill_tokens_per_second": 1,
+            "slow_writer_reply_after_1200ms": [
+              1,
+              2,
+              10,
+              10,
+              0,
+              1,
+              1
+            ],
+            "state_exists_after_1200ms": false
+          },
+          "passed": false
+        }
+      ],
+      "algorithm_results": [
+        {
+          "algorithm": "sliding_window",
+          "passed": false,
+          "failed_assertions": [
+            "sliding_window.mixed_configuration_ttl_never_shortens",
+            "sliding_window.mixed_configuration_preserves_long_window_history"
+          ]
+        },
+        {
+          "algorithm": "token_bucket",
+          "passed": false,
+          "failed_assertions": [
+            "token_bucket.mixed_configuration_ttl_never_shortens",
+            "token_bucket.mixed_configuration_preserves_slow_refill_state"
+          ]
+        }
+      ],
+      "command_stats": {
+        "cmdstat_evalsha": "calls=39,usec=2888,usec_per_call=74.05,rejected_calls=0,failed_calls=4",
+        "cmdstat_hget": "calls=50,usec=43,usec_per_call=0.86,rejected_calls=0,failed_calls=0",
+        "cmdstat_hgetall": "calls=18,usec=19,usec_per_call=1.06,rejected_calls=0,failed_calls=0",
+        "cmdstat_hset": "calls=64,usec=75,usec_per_call=1.17,rejected_calls=0,failed_calls=0",
+        "cmdstat_script|exists": "calls=2,usec=5,usec_per_call=2.50,rejected_calls=0,failed_calls=0",
+        "cmdstat_script|load": "calls=4,usec=987,usec_per_call=246.75,rejected_calls=0,failed_calls=0",
+        "cmdstat_time": "calls=33,usec=26,usec_per_call=0.79,rejected_calls=0,failed_calls=0",
+        "cmdstat_zadd": "calls=68,usec=102,usec_per_call=1.50,rejected_calls=0,failed_calls=0",
+        "cmdstat_zrange": "calls=63,usec=54,usec_per_call=0.86,rejected_calls=0,failed_calls=0"
+      },
+      "scripts_present_before": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scripts_present_after": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "final_active_counts": {
+        "sliding_window": 0,
+        "token_bucket": 0
+      },
+      "passed": false
+    }
+  ],
+  "eval_evalsha_semantics_equal": true,
+  "eval_evalsha_invariant_outcomes_equal": true,
+  "failures": [
+    "eval/sliding_window correctness gate failed: sliding_window.mixed_configuration_ttl_never_shortens, sliding_window.mixed_configuration_preserves_long_window_history",
+    "eval/token_bucket correctness gate failed: token_bucket.mixed_configuration_ttl_never_shortens, token_bucket.mixed_configuration_preserves_slow_refill_state",
+    "evalsha/sliding_window correctness gate failed: sliding_window.mixed_configuration_ttl_never_shortens, sliding_window.mixed_configuration_preserves_long_window_history",
+    "evalsha/token_bucket correctness gate failed: token_bucket.mixed_configuration_ttl_never_shortens, token_bucket.mixed_configuration_preserves_slow_refill_state"
+  ]
+}

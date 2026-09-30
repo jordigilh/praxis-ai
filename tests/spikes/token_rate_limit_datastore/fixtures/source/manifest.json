@@ -1,0 +1,140 @@
+{
+  "baseline_commit": "56af0e37e4bda2f06c7e33546db66a8d01fce0b7",
+  "fixed_candidate_commit": "b6fe4704af72c05167a280d5070a291997d2085d",
+  "plain_candidate_commit": "3ad8d12d6ad7014f7f632ba3468f74f8de13ce77",
+  "schema_version": 1,
+  "sources": [
+    {
+      "bytes": 174284,
+      "path": "baseline/Cargo.lock",
+      "sha256": "d73d2345cb723cab5b06fa135e797825012d8f00102c9992bfd867dad5b07f6f",
+      "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/Cargo.lock"
+    },
+    {
+      "bytes": 11799,
+      "path": "baseline/Cargo.toml",
+      "sha256": "b42fb07efa71465b9316e6f7e3f0be0826d81da744f416d7c577c5a63b68f389",
+      "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/Cargo.toml"
+    },
+    {
+      "bytes": 97476,
+      "path": "baseline/backend.rs",
+      "sha256": "bef06c8e5d03680c972b7162891bd65a2ae6a500edf5a9ad03ea988e86bcecc6",
+      "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/filters/src/token_rate_limit/backend.rs"
+    },
+    {
+      "bytes": 26786,
+      "path": "baseline/config.rs",
+      "sha256": "ff7d11b9a13c710dba9e31daf3d7616050820579a73313d8b906be2d5305004b",
+      "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/filters/src/token_rate_limit/config.rs"
+    },
+    {
+      "bytes": 2296,
+      "path": "baseline/lua/sliding_window_reconcile.lua",
+      "sha256": "3fc7237c0b5cbd1a0cfff9d80eb36af74d0afb3af856516d011f5a0e26f4022b",
+      "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/filters/src/token_rate_limit/lua/sliding_window_reconcile.lua"
+    },
+    {
+      "bytes": 7067,
+      "path": "baseline/lua/sliding_window_reserve.lua",
+      "sha256": "0662b83684add7eb839842d97c86f686ffa9c3a4f560b2eb4a719cf366787731",
+      "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/filters/src/token_rate_limit/lua/sliding_window_reserve.lua"
+    },
+    {
+      "bytes": 2381,
+      "path": "baseline/lua/token_bucket_reconcile.lua",
+      "sha256": "3a245dc656ae17c79f58a604cd19c11c119fd466243d15b0c85d7414c8b72980",
+      "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/filters/src/token_rate_limit/lua/token_bucket_reconcile.lua"
+    },
+    {
+      "bytes": 5529,
+      "path": "baseline/lua/token_bucket_reserve.lua",
+      "sha256": "1e71f86a609d36ee569825a96bda21ed6c0dfae9e226866b12d581608090cb0b",
+      "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/filters/src/token_rate_limit/lua/token_bucket_reserve.lua"
+    },
+    {
+      "bytes": 82777,
+      "path": "baseline/mod.rs",
+      "sha256": "ff979a6c58ddd62e4ebf200d35d7d70ba0cd8c65b5f8be0c0c38329838a3a1c1",
+      "url": "https://raw.githubusercontent.com/praxis-proxy/ai/56af0e37e4bda2f06c7e33546db66a8d01fce0b7/filters/src/token_rate_limit/mod.rs"
+    },
+    {
+      "bytes": 175056,
+      "path": "fixed/Cargo.lock",
+      "sha256": "75396fc72d8637179356088c8bb0b0f28409c699a582f05c09af22caf0bcf1a7",
+      "url": "https://raw.githubusercontent.com/jordigilh/praxis-ai/b6fe4704af72c05167a280d5070a291997d2085d/Cargo.lock"
+    },
+    {
+      "bytes": 12063,
+      "path": "fixed/Cargo.toml",
+      "sha256": "4ffad9e613e992c0c5fb5a70593f1ef0f23795fe5601bace31d45a17eecac094",
+      "url": "https://raw.githubusercontent.com/jordigilh/praxis-ai/b6fe4704af72c05167a280d5070a291997d2085d/Cargo.toml"
+    },
+    {
+      "bytes": 127437,
+      "path": "fixed/backend.rs",
+      "sha256": "bb953b445a17b4ed5468872eba6e843642d175396585e6a45a236ea18b1e69da",
+      "url": "https://raw.githubusercontent.com/jordigilh/praxis-ai/b6fe4704af72c05167a280d5070a291997d2085d/filters/src/token_rate_limit/backend.rs"
+    },
+    {
+      "bytes": 47821,
+      "path": "fixed/config.rs",
+      "sha256": "5f0ff6298a7588ec0ad285c378b1e6931c25c599788021efb724389553d4a2d3",
+      "url": "https://raw.githubusercontent.com/jordigilh/praxis-ai/b6fe4704af72c05167a280d5070a291997d2085d/filters/src/token_rate_limit/config.rs"
+    },
+    {
+      "bytes": 2954,
+      "path": "fixed/lua/sliding_window_reconcile.lua",
+      "sha256": "55ada254b2060d3ca94ab54f8231405cb22ca27f3730e3c3c8d466f66a809e72",
+      "url": "https://raw.githubusercontent.com/jordigilh/praxis-ai/b6fe4704af72c05167a280d5070a291997d2085d/filters/src/token_rate_limit/lua/sliding_window_reconcile.lua"
+    },
+    {
+      "bytes": 7726,
+      "path": "fixed/lua/sliding_window_reserve.lua",
+      "sha256": "53169c4b77de83471fa12f63d3f90336651b5aaee8872606ee16b00ad606187d",
+      "url": "https://raw.githubusercontent.com/jordigilh/praxis-ai/b6fe4704af72c05167a280d5070a291997d2085d/filters/src/token_rate_limit/lua/sliding_window_reserve.lua"
+    },
+    {
+      "bytes": 3018,
+      "path": "fixed/lua/token_bucket_reconcile.lua",
+      "sha256": "784f678630243394932c71a7e31faa29c0d8fdb8db3428e130ccd6d727e36a9f",
+      "url": "https://raw.githubusercontent.com/jordigilh/praxis-ai/b6fe4704af72c05167a280d5070a291997d2085d/filters/src/token_rate_limit/lua/token_bucket_reconcile.lua"
+    },
+    {
+      "bytes": 6160,
+      "path": "fixed/lua/token_bucket_reserve.lua",
+      "sha256": "51e15a5d1afe15d17c6dbe02b3828b0a3d856559f41bd95abc4bc9d0d792d3f6",
+      "url": "https://raw.githubusercontent.com/jordigilh/praxis-ai/b6fe4704af72c05167a280d5070a291997d2085d/filters/src/token_rate_limit/lua/token_bucket_reserve.lua"
+    },
+    {
+      "bytes": 85639,
+      "path": "fixed/mod.rs",
+      "sha256": "6f901b4bf06db9c90a69d4f2f81fee808257158940bb5057541681014503bc5c",
+      "url": "https://raw.githubusercontent.com/jordigilh/praxis-ai/b6fe4704af72c05167a280d5070a291997d2085d/filters/src/token_rate_limit/mod.rs"
+    },
+    {
+      "bytes": 14864,
+      "path": "plain/connection.rs",
+      "sha256": "8790ee651f1b507b4b13fac7101281654abc0708482cf34e46c913601bd28a19",
+      "url": "https://raw.githubusercontent.com/szedan-rh/ai/3ad8d12d6ad7014f7f632ba3468f74f8de13ce77/filters/src/token_rate_limit/valkey/connection.rs"
+    },
+    {
+      "bytes": 6853,
+      "path": "plain/mod.rs",
+      "sha256": "af39dbd25366b65cc830129a4a39321a91d060e5e697408ceab60770f39a6a92",
+      "url": "https://raw.githubusercontent.com/szedan-rh/ai/3ad8d12d6ad7014f7f632ba3468f74f8de13ce77/filters/src/token_rate_limit/valkey/mod.rs"
+    },
+    {
+      "bytes": 43146,
+      "path": "plain/sliding_window.rs",
+      "sha256": "96ace328f13272e70386a26f4e579d813550f05aa7e8f9ebd5e0b394b4d6e724",
+      "url": "https://raw.githubusercontent.com/szedan-rh/ai/3ad8d12d6ad7014f7f632ba3468f74f8de13ce77/filters/src/token_rate_limit/valkey/sliding_window.rs"
+    },
+    {
+      "bytes": 50200,
+      "path": "plain/token_bucket.rs",
+      "sha256": "2aed3bb2672702639686fb2fa346d0349c24003f01f39b63780deaa0f90c6983",
+      "url": "https://raw.githubusercontent.com/szedan-rh/ai/3ad8d12d6ad7014f7f632ba3468f74f8de13ce77/filters/src/token_rate_limit/valkey/token_bucket.rs"
+    }
+  ]
+}

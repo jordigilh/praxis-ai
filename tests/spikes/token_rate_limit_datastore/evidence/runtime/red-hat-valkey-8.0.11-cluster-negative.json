@@ -1,0 +1,286 @@
+{
+  "schema_version": 1,
+  "evidence_class": "diagnostic_negative_control_not_qualification",
+  "product": "red_hat_valkey",
+  "expected_version": "8.0.11",
+  "server_identity": {
+    "arch_bits": "64",
+    "os": "Linux 7.1.10-200.fc44.aarch64 aarch64",
+    "redis_version": "7.2.4",
+    "run_id": "b356819f712a97434be427ff7c6aa104abd7ecaa",
+    "valkey_version": "8.0.11"
+  },
+  "topology": {
+    "profile": "native_cluster_three_primaries_zero_replicas",
+    "seeds": [
+      "redis://127.0.0.1:17100/",
+      "redis://127.0.0.1:17101/",
+      "redis://127.0.0.1:17102/"
+    ],
+    "cluster_info": {
+      "cluster_current_epoch": "3",
+      "cluster_known_nodes": "3",
+      "cluster_my_epoch": "1",
+      "cluster_size": "3",
+      "cluster_slots_assigned": "16384",
+      "cluster_slots_fail": "0",
+      "cluster_slots_ok": "16384",
+      "cluster_slots_pfail": "0",
+      "cluster_state": "ok",
+      "cluster_stats_messages_meet_received": "2",
+      "cluster_stats_messages_ping_received": "6",
+      "cluster_stats_messages_ping_sent": "6",
+      "cluster_stats_messages_pong_received": "6",
+      "cluster_stats_messages_pong_sent": "8",
+      "cluster_stats_messages_received": "14",
+      "cluster_stats_messages_sent": "14",
+      "total_cluster_links_buffer_limit_exceeded": "0"
+    },
+    "cluster_nodes": "f3a1d043c87718fe56f0517ec0408b9dd656a18a 127.0.0.1:17100@27100 myself,master - 0 0 1 connected 0-5460\n1ee9064aad50a80f67110ae462fb1cdd290427d4 127.0.0.1:17101@27101 master - 0 1790703513529 2 connected 5461-10922\n7ec98dbfaa884417d6af03fd970c46515efe4166 127.0.0.1:17102@27102 master - 0 1790703513529 3 connected 10923-16383\n",
+    "server_config": {
+      "appendonly": "no",
+      "cluster-enabled": "yes",
+      "cluster-node-timeout": "2000",
+      "cluster-require-full-coverage": "yes",
+      "maxmemory-policy": "noeviction",
+      "save": ""
+    }
+  },
+  "client": {
+    "crate_name": "redis",
+    "version": "1.7.0",
+    "checksum": "2acbc41a996f7652b2ddd9dfd98cc4ff602cfd742ae35382f07f608405ab50ed",
+    "features": [
+      "tokio-comp",
+      "cluster-async",
+      "script"
+    ],
+    "retries": 0,
+    "max_connection_attempts": 1,
+    "connection_timeout_ms": 500,
+    "response_timeout_ms": 500,
+    "overall_response_timeout_ms": 1000,
+    "outer_deadline_ms": 1000,
+    "read_routing": "primary_only_default"
+  },
+  "negative_cases": [
+    {
+      "id": "cluster.current_eval.sliding_cross_slot",
+      "candidate": "current_eval",
+      "algorithm": "sliding_window",
+      "expected": "the cross-slot operation is rejected rather than routed with weakened atomicity",
+      "key_slots": [
+        13748,
+        15864,
+        8745,
+        1849,
+        13183,
+        465,
+        10816,
+        2498,
+        4349,
+        10018,
+        4598,
+        7921
+      ],
+      "error": {
+        "kind": "Server(CrossSlot)",
+        "code": "CROSSSLOT",
+        "detail": "Keys in request don't hash to the same slot",
+        "display": "CrossSlot: Keys in request don't hash to the same slot"
+      },
+      "passed": true
+    },
+    {
+      "id": "cluster.current_evalsha.sliding_cross_slot",
+      "candidate": "current_evalsha",
+      "algorithm": "sliding_window",
+      "expected": "the cross-slot operation is rejected rather than routed with weakened atomicity",
+      "key_slots": [
+        13748,
+        15864,
+        8745,
+        1849,
+        13183,
+        465,
+        10816,
+        2498,
+        4349,
+        10018,
+        4598,
+        7921
+      ],
+      "error": {
+        "kind": "Server(CrossSlot)",
+        "code": "CROSSSLOT",
+        "detail": "Keys in request don't hash to the same slot",
+        "display": "CrossSlot: Keys in request don't hash to the same slot"
+      },
+      "passed": true
+    },
+    {
+      "id": "cluster.current_eval.token_bucket_cross_slot",
+      "candidate": "current_eval",
+      "algorithm": "token_bucket",
+      "expected": "the cross-slot operation is rejected rather than routed with weakened atomicity",
+      "key_slots": [
+        2365,
+        792,
+        8766,
+        9324,
+        14325,
+        15699,
+        10423,
+        12680,
+        2374,
+        11733,
+        1286
+      ],
+      "error": {
+        "kind": "Server(CrossSlot)",
+        "code": "CROSSSLOT",
+        "detail": "Keys in request don't hash to the same slot",
+        "display": "CrossSlot: Keys in request don't hash to the same slot"
+      },
+      "passed": true
+    },
+    {
+      "id": "cluster.current_evalsha.token_bucket_cross_slot",
+      "candidate": "current_evalsha",
+      "algorithm": "token_bucket",
+      "expected": "the cross-slot operation is rejected rather than routed with weakened atomicity",
+      "key_slots": [
+        2365,
+        792,
+        8766,
+        9324,
+        14325,
+        15699,
+        10423,
+        12680,
+        2374,
+        11733,
+        1286
+      ],
+      "error": {
+        "kind": "Server(CrossSlot)",
+        "code": "CROSSSLOT",
+        "detail": "Keys in request don't hash to the same slot",
+        "display": "CrossSlot: Keys in request don't hash to the same slot"
+      },
+      "passed": true
+    },
+    {
+      "id": "cluster.plain.sliding_transaction_cross_slot",
+      "candidate": "plain_commands_pr_1380",
+      "algorithm": "sliding_window",
+      "expected": "the cross-slot operation is rejected rather than routed with weakened atomicity",
+      "key_slots": [
+        10912,
+        3911,
+        2525,
+        12873
+      ],
+      "error": {
+        "kind": "Server(CrossSlot)",
+        "code": "CROSSSLOT",
+        "detail": null,
+        "display": "Received crossed slots in pipeline - Server(CrossSlot)"
+      },
+      "passed": true
+    },
+    {
+      "id": "cluster.script.dynamic_non_local_key",
+      "candidate": "same_slot_declared_keys_diagnostic",
+      "algorithm": "sliding_window",
+      "expected": "the cross-slot operation is rejected rather than routed with weakened atomicity",
+      "key_slots": [
+        2708,
+        8310
+      ],
+      "error": {
+        "kind": "Server(ResponseError)",
+        "code": "ERR",
+        "detail": "Script attempted to access a non local key in a cluster node script: e0435ad2a865f3763b9986b6b4acbd909ce8e5f2, on @user_script:39.",
+        "display": "ResponseError: Script attempted to access a non local key in a cluster node script: e0435ad2a865f3763b9986b6b4acbd909ce8e5f2, on @user_script:39."
+      },
+      "passed": true
+    }
+  ],
+  "decomposition_cases": [
+    {
+      "id": "cluster.redis_rs.cross_slot_mget_decomposes",
+      "candidate": "plain_commands_pr_1380",
+      "command": "MGET",
+      "key_slots": [
+        11051,
+        6984
+      ],
+      "reply": [
+        "value-0",
+        "value-1"
+      ],
+      "error": null,
+      "observation": "a cross-slot MGET succeeded through redis-rs even though a server node cannot execute that command atomically; the client decomposed it by slot",
+      "passed": true
+    },
+    {
+      "id": "cluster.redis_rs.cross_slot_watch_decomposes",
+      "candidate": "plain_commands_pr_1380",
+      "command": "WATCH",
+      "key_slots": [
+        10518,
+        14424
+      ],
+      "reply": "OK",
+      "error": null,
+      "observation": "a cross-slot WATCH returned success and per-node command statistics show WATCH on multiple primaries; it is not one server-side transaction watch set",
+      "passed": true
+    }
+  ],
+  "evalsha_cache_load": {
+    "script_hash": "d3c21d0c2b9ca22f82737626a27bcaf5d288f99f",
+    "cold_reply": "cache-evidence",
+    "script_exists_by_seed": {
+      "redis://127.0.0.1:17100/": true,
+      "redis://127.0.0.1:17101/": true,
+      "redis://127.0.0.1:17102/": true
+    },
+    "standard_client_fanout_observed": true
+  },
+  "per_node_command_stats": {
+    "redis://127.0.0.1:17100/": {
+      "cmdstat_client|setinfo": "calls=8,usec=4,usec_per_call=0.50,rejected_calls=0,failed_calls=0",
+      "cmdstat_cluster|info": "calls=1,usec=21,usec_per_call=21.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_cluster|nodes": "calls=1,usec=40,usec_per_call=40.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_eval": "calls=1,usec=269,usec_per_call=269.00,rejected_calls=1,failed_calls=1",
+      "cmdstat_evalsha": "calls=2,usec=29,usec_per_call=14.50,rejected_calls=1,failed_calls=1",
+      "cmdstat_ping": "calls=1,usec=0,usec_per_call=0.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_readonly": "calls=1,usec=1,usec_per_call=1.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_script|exists": "calls=1,usec=1,usec_per_call=1.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_script|load": "calls=1,usec=26,usec_per_call=26.00,rejected_calls=0,failed_calls=0"
+    },
+    "redis://127.0.0.1:17101/": {
+      "cmdstat_client|setinfo": "calls=6,usec=2,usec_per_call=0.33,rejected_calls=0,failed_calls=0",
+      "cmdstat_mget": "calls=1,usec=3,usec_per_call=3.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_ping": "calls=1,usec=0,usec_per_call=0.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_readonly": "calls=1,usec=1,usec_per_call=1.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_script|exists": "calls=1,usec=5,usec_per_call=5.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_script|load": "calls=1,usec=35,usec_per_call=35.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_watch": "calls=1,usec=2,usec_per_call=2.00,rejected_calls=0,failed_calls=0"
+    },
+    "redis://127.0.0.1:17102/": {
+      "cmdstat_client|setinfo": "calls=6,usec=1,usec_per_call=0.17,rejected_calls=0,failed_calls=0",
+      "cmdstat_cluster|slots": "calls=1,usec=40,usec_per_call=40.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_eval": "calls=0,usec=0,usec_per_call=0.00,rejected_calls=1,failed_calls=0",
+      "cmdstat_evalsha": "calls=0,usec=0,usec_per_call=0.00,rejected_calls=1,failed_calls=0",
+      "cmdstat_mget": "calls=1,usec=1,usec_per_call=1.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_ping": "calls=1,usec=1,usec_per_call=1.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_readonly": "calls=1,usec=0,usec_per_call=0.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_script|exists": "calls=1,usec=1,usec_per_call=1.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_script|load": "calls=1,usec=33,usec_per_call=33.00,rejected_calls=0,failed_calls=0",
+      "cmdstat_watch": "calls=1,usec=2,usec_per_call=2.00,rejected_calls=0,failed_calls=0"
+    }
+  },
+  "passed": true
+}
