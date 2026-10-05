@@ -2546,12 +2546,18 @@ mod backend_injection_tests {
     fn backend_error_metric_kind_uses_only_bounded_values() {
         assert_eq!(
             backend_error_kind(&BackendError::Unavailable("backend detail".to_owned())),
-            "unavailable"
+            "unavailable",
+            "unavailable backend errors map to the unavailable label"
         );
-        assert_eq!(backend_error_kind(&BackendError::InvalidResponse), "invalid_response");
+        assert_eq!(
+            backend_error_kind(&BackendError::InvalidResponse),
+            "invalid_response",
+            "invalid backend responses map to the invalid_response label"
+        );
         assert_eq!(
             backend_error_kind(&BackendError::ConfigurationMismatch),
-            "configuration_mismatch"
+            "configuration_mismatch",
+            "configuration mismatches map to the configuration_mismatch label"
         );
     }
 

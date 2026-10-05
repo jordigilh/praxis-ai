@@ -439,7 +439,8 @@ mod tests {
         );
         assert_ne!(
             sliding,
-            sliding_window_config_fingerprint(&budgets, 30_001, 100, 1_000, &policy)
+            sliding_window_config_fingerprint(&budgets, 30_001, 100, 1_000, &policy),
+            "reservation timeout changes the sliding-window fingerprint"
         );
     }
 
@@ -460,7 +461,8 @@ mod tests {
         assert_ne!(sliding, bucket, "algorithm identity is part of the fingerprint");
         assert_ne!(
             bucket,
-            token_bucket_config_fingerprint(1_000, 1.5, 30_000, 100, 1_000, &policy)
+            token_bucket_config_fingerprint(1_000, 1.5, 30_000, 100, 1_000, &policy),
+            "refill rate changes the token-bucket fingerprint"
         );
         assert_ne!(
             accounting_config_key("ns", "sw", "rule"),
@@ -485,11 +487,13 @@ mod tests {
         let sliding = sliding_window_config_fingerprint(&budgets, 30_000, 100, 1_000, &policy);
         assert_ne!(
             sliding,
-            sliding_window_config_fingerprint(&budgets, 30_000, 101, 1_000, &policy)
+            sliding_window_config_fingerprint(&budgets, 30_000, 101, 1_000, &policy),
+            "max_keys changes the sliding-window fingerprint"
         );
         assert_ne!(
             sliding,
-            sliding_window_config_fingerprint(&budgets, 30_000, 100, 1_001, &policy)
+            sliding_window_config_fingerprint(&budgets, 30_000, 100, 1_001, &policy),
+            "max_active_reservations changes the sliding-window fingerprint"
         );
     }
 
@@ -526,43 +530,58 @@ mod tests {
         let sliding = sliding_window_config_fingerprint(&budgets, 30_000, 100, 1_000, &policy);
         assert_ne!(
             sliding,
-            sliding_window_config_fingerprint(&budgets, 30_000, 100, 1_000, &changed_estimation)
+            sliding_window_config_fingerprint(&budgets, 30_000, 100, 1_000, &changed_estimation),
+            "estimation policy changes the sliding-window fingerprint"
         );
         assert_ne!(
             sliding,
-            sliding_window_config_fingerprint(&budgets, 30_000, 100, 1_000, &changed_weights)
+            sliding_window_config_fingerprint(&budgets, 30_000, 100, 1_000, &changed_weights),
+            "token weights change the sliding-window fingerprint"
         );
         assert_ne!(
             sliding,
-            sliding_window_config_fingerprint(&budgets, 30_000, 100, 1_000, &changed_key)
+            sliding_window_config_fingerprint(&budgets, 30_000, 100, 1_000, &changed_key),
+            "key policy changes the sliding-window fingerprint"
         );
 
         let bucket = token_bucket_config_fingerprint(1_000, 1.25, 30_000, 100, 1_000, &policy);
         assert_ne!(
             bucket,
-            token_bucket_config_fingerprint(1_000, 1.25, 30_000, 100, 1_000, &changed_estimation)
+            token_bucket_config_fingerprint(1_000, 1.25, 30_000, 100, 1_000, &changed_estimation),
+            "estimation policy changes the token-bucket fingerprint"
         );
         assert_ne!(
             bucket,
-            token_bucket_config_fingerprint(1_000, 1.25, 30_000, 100, 1_000, &changed_weights)
+            token_bucket_config_fingerprint(1_000, 1.25, 30_000, 100, 1_000, &changed_weights),
+            "token weights change the token-bucket fingerprint"
         );
         assert_ne!(
             bucket,
-            token_bucket_config_fingerprint(1_000, 1.25, 30_000, 100, 1_000, &changed_key)
+            token_bucket_config_fingerprint(1_000, 1.25, 30_000, 100, 1_000, &changed_key),
+            "key policy changes the token-bucket fingerprint"
         );
     }
 
     #[test]
     fn accounting_marker_validation_fails_closed_for_mismatch_or_loss() {
-        assert!(validate_accounting_config(Some("expected"), "expected").is_ok());
-        assert!(matches!(
-            validate_accounting_config(Some("other"), "expected"),
-            Err(BackendError::ConfigurationMismatch)
-        ));
-        assert!(matches!(
-            validate_accounting_config(None, "expected"),
-            Err(BackendError::InvalidResponse)
-        ));
+        assert!(
+            validate_accounting_config(Some("expected"), "expected").is_ok(),
+            "matching accounting markers are accepted"
+        );
+        assert!(
+            matches!(
+                validate_accounting_config(Some("other"), "expected"),
+                Err(BackendError::ConfigurationMismatch)
+            ),
+            "mismatched accounting markers fail closed"
+        );
+        assert!(
+            matches!(
+                validate_accounting_config(None, "expected"),
+                Err(BackendError::InvalidResponse)
+            ),
+            "missing accounting markers are treated as invalid responses"
+        );
     }
 
     #[test]
