@@ -1587,6 +1587,10 @@ impl TokenRateLimitFilter {
     /// Returns [`FilterError`] if the YAML config is invalid, `rules` is
     /// empty, two rules share a `name`, or any individual rule fails to
     /// compile (see `compile_rule`).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "filter validation and compiled-rule assembly stay together"
+    )]
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: TokenRateLimitConfig = parse_filter_config("token_rate_limit", config)?;
         if cfg.rules.is_empty() {
