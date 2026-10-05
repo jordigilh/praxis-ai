@@ -45,15 +45,16 @@ use redis::aio::MultiplexedConnection;
 
 use super::{
     super::{
+        AccountingPolicy,
         backend::{
             BackendError, BackendReserve, BackendSettlement, BackendSnapshot, ReconcileRequest, ReconcileWorker,
             ReserveRequest, TokenRateLimitStateBackend,
         },
         ledger::{Budget, DenialReason},
     },
-    RuleTelemetry, ValkeyConnection, amount,
+    RuleTelemetry, ValkeyConnection, accounting_config_key, amount,
     connection::{AbortRetry, command_error, unwatch},
-    count, extend_shared_ttl, key_hash, parse_reservation,
+    count, ensure_accounting_config, extend_shared_ttl, key_hash, parse_reservation, sliding_window_config_fingerprint,
     window::{BucketRange, bucket_index, bucket_ms, retry_after_ms},
 };
 
@@ -73,6 +74,8 @@ pub(in crate::token_rate_limit) struct ValkeySlidingWindowConfig {
     pub(in crate::token_rate_limit) max_keys: usize,
     /// Maximum unsettled reservations per namespace and algorithm.
     pub(in crate::token_rate_limit) max_active_reservations: usize,
+    /// Stable policy inputs used for reservations and reconciliation.
+    pub(in crate::token_rate_limit) accounting: AccountingPolicy,
 }
 
 /// Sliding-window admission state shared across replicas.
@@ -97,6 +100,9 @@ pub(in crate::token_rate_limit) struct ValkeySlidingWindowBackend {
     max_window_ms: u64,
     /// Distinct sub-window widths across `budgets`, each written once.
     widths: Vec<CounterWidth>,
+    /// Persistent marker preventing replicas with incompatible accounting
+    /// semantics from sharing this rule's state.
+    config_fingerprint: String,
     /// Background reconciliation queue.
     worker: ReconcileWorker,
     /// Last observed state for gauges, shared with the worker clone.
@@ -131,6 +137,13 @@ impl ValkeySlidingWindowBackend {
         let limit = config.budgets.iter().map(|budget| budget.capacity).min().unwrap_or(0);
         let max_window_ms = config.budgets.iter().map(|budget| budget.window_ms).max().unwrap_or(0);
         let widths = counter_widths(&config.budgets, config.reservation_timeout_ms);
+        let config_fingerprint = sliding_window_config_fingerprint(
+            &config.budgets,
+            config.reservation_timeout_ms,
+            config.max_keys,
+            config.max_active_reservations,
+            &config.accounting,
+        );
         Self {
             valkey: config.valkey,
             namespace: config.namespace,
@@ -142,6 +155,7 @@ impl ValkeySlidingWindowBackend {
             limit,
             max_window_ms,
             widths,
+            config_fingerprint,
             worker: ReconcileWorker::new(),
             telemetry: Arc::new(RuleTelemetry::default()),
         }
@@ -162,6 +176,7 @@ impl ValkeySlidingWindowBackend {
             limit: self.limit,
             max_window_ms: self.max_window_ms,
             widths: self.widths.clone(),
+            config_fingerprint: self.config_fingerprint.clone(),
             worker: ReconcileWorker::detached(),
             telemetry: Arc::clone(&self.telemetry),
         }
@@ -242,6 +257,25 @@ impl ValkeySlidingWindowBackend {
         self.max_window_ms
             .saturating_add(self.reservation_timeout_ms)
             .max(1_000)
+    }
+
+    /// Persistent marker for this rule's sliding-window accounting semantics.
+    fn accounting_config_key(&self) -> String {
+        accounting_config_key(&self.namespace, "sw", &self.rule)
+    }
+
+    /// Initialize or validate the marker before reading or mutating quota
+    /// state. This is deliberately a separate pipeline so a mismatched
+    /// writer does not even trim shared indexes.
+    async fn ensure_accounting_config(&self) -> Result<(), BackendError> {
+        let state_index = self.keys_key();
+        ensure_accounting_config(
+            &self.valkey,
+            &self.accounting_config_key(),
+            &self.config_fingerprint,
+            &state_index,
+        )
+        .await
     }
 
     // -------------------------------------------------------------------------
@@ -604,8 +638,9 @@ fn next_i64(values: &mut impl Iterator<Item = redis::Value>) -> Result<i64, Back
 #[async_trait]
 impl TokenRateLimitStateBackend for ValkeySlidingWindowBackend {
     async fn reserve(&self, request: ReserveRequest) -> Result<BackendReserve, BackendError> {
+        Box::pin(self.ensure_accounting_config()).await?;
         let id = self.key_id(&request.key);
-        let reads = self.read_window(&id, request.now_ms).await?;
+        let reads = Box::pin(self.read_window(&id, request.now_ms)).await?;
         let (keys_after, active_after) = (reads.keys, reads.active);
         match self.decide(&reads, request.estimate, request.now_ms) {
             Decision::Denied {
@@ -621,7 +656,7 @@ impl TokenRateLimitStateBackend for ValkeySlidingWindowBackend {
                 })
             },
             Decision::Admit { max_usage, remaining } => {
-                let reservation_id = self.admit(&id, &request).await?;
+                let reservation_id = Box::pin(self.admit(&id, &request)).await?;
                 let keys_after = keys_after.saturating_add(usize::from(!reads.key_known));
                 self.telemetry
                     .record(remaining, active_after.saturating_add(1), keys_after);
@@ -640,6 +675,7 @@ impl TokenRateLimitStateBackend for ValkeySlidingWindowBackend {
         reason = "transaction.finish() consumes the connection after the borrowed attempt"
     )]
     async fn reconcile(&self, request: ReconcileRequest) -> Result<BackendSettlement, BackendError> {
+        Box::pin(self.ensure_accounting_config()).await?;
         let mut retry = AbortRetry::start();
         loop {
             let mut transaction = self.valkey.transaction().await?;
@@ -697,7 +733,7 @@ mod tests {
         BucketRange, CounterWidth, DenialReason, ValkeySlidingWindowBackend, ValkeySlidingWindowConfig, counter_widths,
         retry_after_ms,
     };
-    use crate::token_rate_limit::ledger::Budget;
+    use crate::token_rate_limit::{AccountingPolicy, CompiledEstimation, ledger::Budget, weights::TokenWeights};
 
     fn backend(
         namespace: &str,
@@ -739,6 +775,11 @@ mod tests {
             reservation_timeout_ms,
             max_keys: 2,
             max_active_reservations: 2,
+            accounting: AccountingPolicy {
+                estimation: CompiledEstimation::Fixed { estimate: 1 },
+                weights: TokenWeights::UNITY,
+                key_fingerprint: "test-key-policy".to_owned(),
+            },
         }))
     }
 
@@ -749,6 +790,10 @@ mod tests {
         ttl
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps the no-local-state backend contract assertions together"
+    )]
     #[test]
     fn valkey_sliding_window_backend_has_no_local_state_to_reconcile_or_clean_up_synchronously() {
         let backend = ValkeySlidingWindowBackend::new(ValkeySlidingWindowConfig {
@@ -762,6 +807,11 @@ mod tests {
             reservation_timeout_ms: 1_000,
             max_keys: 8,
             max_active_reservations: 8,
+            accounting: AccountingPolicy {
+                estimation: CompiledEstimation::Fixed { estimate: 1 },
+                weights: TokenWeights::UNITY,
+                key_fingerprint: "test-key-policy".to_owned(),
+            },
         });
         assert!(
             backend.cleanup(0, 8).is_none(),

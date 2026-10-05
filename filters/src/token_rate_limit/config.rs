@@ -40,7 +40,7 @@ use serde::Deserialize;
 /// the pipeline. Tracked as follow-on integration work in `grid#101`.
 ///
 /// Observability is group-level by rule, never by user. Metrics carry only
-/// bounded `rule`, `algorithm`, `backend`, `result`, and `capacity` labels;
+/// bounded `rule`, `algorithm`, `backend`, `error`, `result`, and `capacity` labels;
 /// accounting logs and optional OpenTelemetry spans likewise omit raw
 /// subject and bucket-key values. The Prometheus contract is:
 ///
@@ -67,8 +67,9 @@ use serde::Deserialize;
 ///
 /// - `praxis_trl_soft_tier_activations_total{rule,capacity}`
 ///
-/// - `praxis_trl_backend_errors_total{rule,backend}`: failed reservations (the 503 path) and reconciliations abandoned
-///   after their retries.
+/// - `praxis_trl_backend_errors_total{rule,backend,error}`: failed reservations (the 503 path), failed reconciliation
+///   enqueues, and reconciliations abandoned after their retries. `error` is one of `unavailable`, `invalid_response`,
+///   or `configuration_mismatch`.
 ///
 /// - `praxis_trl_backend_reconciliation_total{rule,backend,result}`: reconciliations completed by a Valkey worker.
 ///
@@ -925,8 +926,33 @@ pub(super) struct BackendConfig {
     pub url: Option<String>,
 
     /// Key namespace prefix, so multiple filter rules or deployments can
-    /// share one Valkey instance without colliding. Ignored for
-    /// `kind: memory`. Defaults to `"praxis:token_rate_limit"` when unset.
+    /// share one Valkey instance without colliding. The namespace is
+    /// configured once for the whole filter, not per rule, so changing it
+    /// starts a fresh accounting generation and fresh budgets for every rule
+    /// in that filter. Ignored for `kind: memory`. Defaults to
+    /// `"praxis:token_rate_limit"` when unset.
+    ///
+    /// Valkey permanently records a schema-versioned fingerprint for each
+    /// namespace/rule/algorithm identity. Replicas with a different window,
+    /// capacity, refill rate, reservation timeout, state bound, or compiled
+    /// budget-key policy fail closed with 503 before mutating shared state.
+    /// The compatibility markers use
+    /// `{namespace}:v2:sw:rule:{hash}:accounting-config` for sliding windows
+    /// and `{namespace}:v2:tb:rule:{hash}:accounting-config` for token
+    /// buckets. The fingerprint also includes the compiled estimation
+    /// strategy and effective token-type weights, but never request-derived
+    /// values such as one request's `max_tokens`. A missing marker is
+    /// initialized only when the per-rule retained-key index is absent;
+    /// pre-marker `v2` state fails closed and requires a new namespace
+    /// generation rather than being silently adopted.
+    ///
+    /// To make an intentional semantic change, quiesce the old generation,
+    /// cut every writer over to a new namespace generation, and only then
+    /// retire the complete old namespace. Do not delete only a compatibility
+    /// marker: doing so can bind a new configuration to incompatible residual
+    /// quota state. Avoid serving traffic from both generations during the
+    /// cutover because their budgets are independent. Changing configuration
+    /// in place is deliberately rejected.
     #[serde(default)]
     pub namespace: Option<String>,
 }
