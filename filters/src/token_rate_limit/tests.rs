@@ -1758,6 +1758,44 @@ async fn valkey_unmarked_v2_state_fails_closed_with_503() {
 }
 
 #[tokio::test]
+async fn valkey_unmarked_v2_quota_state_without_index_fails_closed_with_503() {
+    let Ok(url) = std::env::var("TOKEN_RATE_LIMIT_VALKEY_URL") else {
+        tracing::warn!("skipping: TOKEN_RATE_LIMIT_VALKEY_URL not set");
+        return;
+    };
+    let namespace = format!("praxis-test-unmarked-counter-{}", std::process::id());
+    let now_ms = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let key_id = super::valkey::key_hash(&[namespace.as_bytes(), b"default", b"legacy-key"]);
+    let usage_key = format!("{namespace}:v2:{key_id}:u60000:{}", now_ms / 60_000);
+    let connection = super::valkey::ValkeyConnection::new(url.clone()).unwrap();
+    let mut pipe = redis::pipe();
+    pipe.cmd("SET").arg(&usage_key).arg(5).arg("PX").arg(600_000).ignore();
+    let () = connection.pipeline(&pipe).await.unwrap();
+
+    let filter = TokenRateLimitFilter::from_config(&single_rule_valkey_yaml(
+        "algorithm: sliding_window\nwindow: 1h\ncapacity: 5\nreserved_tokens: 1",
+        &url,
+        &namespace,
+    ))
+    .unwrap();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+
+    assert_rejected_with_status(
+        filter.as_ref(),
+        &req,
+        503,
+        "unmarked physical quota state without its index must fail closed",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn valkey_worker_reconciles_usage_off_the_response_path() {
     let Ok(url) = std::env::var("TOKEN_RATE_LIMIT_VALKEY_URL") else {
         tracing::warn!("skipping: TOKEN_RATE_LIMIT_VALKEY_URL not set");

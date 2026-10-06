@@ -14,10 +14,7 @@
 //! delete it in a transaction that `WATCH` aborts when another settlement
 //! got there first.
 
-use std::{
-    future::Future,
-    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
-};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use praxis_ai_apis::hash::Sha256;
 use redis::aio::MultiplexedConnection;
@@ -221,42 +218,164 @@ pub(super) fn accounting_config_key(namespace: &str, algorithm: &str, rule: &str
     )
 }
 
-/// Initialize or validate a persistent accounting configuration marker before
-/// a backend touches quota state. The future is boxed at this boundary because
-/// the marker transaction and retry state exceed the stack-frame lint threshold.
-pub(super) fn ensure_accounting_config<'a>(
-    valkey: &'a ValkeyConnection,
-    marker: &'a str,
-    expected: &'a str,
-    state_index: &'a str,
-) -> impl Future<Output = Result<(), BackendError>> + 'a {
-    Box::pin(async move {
-        let mut marker_read = redis::pipe();
-        marker_read.cmd("GET").arg(marker);
-        let (stored,): (Option<String>,) = valkey.pipeline(&marker_read).await?;
-        if let Some(stored) = stored {
-            return validate_accounting_config(Some(&stored), expected);
-        }
+/// Persistent namespace-generation marker. Unlike quota indexes, this key has
+/// no TTL: a namespace that has been admitted by the marker-aware writer must
+/// not silently fall back to legacy semantics after an idle period.
+fn accounting_generation_key(namespace: &str) -> String {
+    format!("{namespace}:v2:accounting-generation")
+}
 
-        let mut retry = AbortRetry::start();
-        loop {
-            let mut transaction = valkey.transaction().await?;
-            let outcome = ensure_accounting_config_attempt(transaction.inner(), marker, expected, state_index).await;
-            match outcome {
-                Ok(outcome) => {
-                    transaction.finish().await;
-                    if let Some(()) = outcome {
-                        return Ok(());
-                    }
-                },
-                Err(error) => {
-                    drop(transaction);
-                    return Err(error);
-                },
-            }
-            retry.pause().await?;
+/// Value written when a namespace has no unmarked v2 state.
+const ACCOUNTING_GENERATION_VALUE: &str = ACCOUNTING_CONFIG_SCHEMA;
+
+/// Value written when bootstrap finds legacy v2 state. This permanent
+/// tombstone makes subsequent requests fail closed without rescanning the
+/// namespace; recovery requires a new namespace generation.
+const LEGACY_STATE_GENERATION_VALUE: &str = "legacy-v2-state";
+
+/// Initialize or validate a persistent accounting configuration marker before
+/// a backend touches quota state. Callers box this future before awaiting it;
+/// the marker transaction and retry state are inherently larger than the
+/// stack-frame lint threshold.
+#[expect(
+    clippy::large_stack_frames,
+    reason = "all callers box this inherently large Valkey transaction future before awaiting it"
+)]
+pub(super) async fn ensure_accounting_config(
+    valkey: &ValkeyConnection,
+    namespace: &str,
+    marker: &str,
+    expected: &str,
+    state_index: &str,
+) -> Result<(), BackendError> {
+    ensure_accounting_generation(valkey, namespace).await?;
+    let mut marker_read = redis::pipe();
+    marker_read.cmd("GET").arg(marker);
+    let (stored,): (Option<String>,) = valkey.pipeline(&marker_read).await?;
+    if let Some(stored) = stored {
+        return validate_accounting_config(Some(&stored), expected);
+    }
+
+    let mut retry = AbortRetry::start();
+    loop {
+        let mut transaction = valkey.transaction().await?;
+        let outcome = ensure_accounting_config_attempt(transaction.inner(), marker, expected, state_index).await;
+        match outcome {
+            Ok(outcome) => {
+                transaction.finish().await;
+                if let Some(()) = outcome {
+                    return Ok(());
+                }
+            },
+            Err(error) => {
+                drop(transaction);
+                return Err(error);
+            },
         }
-    })
+        retry.pause().await?;
+    }
+}
+
+/// Bootstrap a namespace generation without adopting any unmarked v2 key.
+///
+/// The retained-key index is deliberately not enough evidence: it expires,
+/// while legacy counters, buckets, and the id sequence can have different
+/// lifetimes. A generation marker is established once, after a namespace scan
+/// finds either no keys or only markers written by this implementation. If
+/// unmarked state is found, a permanent tombstone forces an explicit namespace
+/// cutover instead of allowing a new policy to reinterpret it.
+#[expect(
+    clippy::large_stack_frames,
+    reason = "namespace bootstrap owns the bounded Valkey scan state machine"
+)]
+async fn ensure_accounting_generation(valkey: &ValkeyConnection, namespace: &str) -> Result<(), BackendError> {
+    let generation = accounting_generation_key(namespace);
+    let mut read = redis::pipe();
+    read.cmd("GET").arg(&generation);
+    let (stored,): (Option<String>,) = valkey.pipeline(&read).await?;
+    if let Some(stored) = stored {
+        return (stored == ACCOUNTING_GENERATION_VALUE)
+            .then_some(())
+            .ok_or(BackendError::ConfigurationMismatch);
+    }
+
+    let scan = scan_namespace_state(valkey, namespace).await?;
+    let value = if scan.unmarked_state {
+        LEGACY_STATE_GENERATION_VALUE
+    } else {
+        ACCOUNTING_GENERATION_VALUE
+    };
+    let mut claim = redis::pipe();
+    claim.atomic();
+    claim.cmd("SET").arg(&generation).arg(value).arg("NX").ignore();
+    claim.cmd("GET").arg(&generation);
+    let (stored,): (Option<String>,) = valkey.pipeline(&claim).await?;
+    match stored.as_deref() {
+        Some(value) if value == ACCOUNTING_GENERATION_VALUE => Ok(()),
+        Some(_) => Err(BackendError::ConfigurationMismatch),
+        None => Err(BackendError::InvalidResponse),
+    }
+}
+
+/// Result of the one-time namespace bootstrap scan.
+#[derive(Default)]
+struct NamespaceScan {
+    /// At least one v2 key that is not a generation or accounting marker was found.
+    unmarked_state: bool,
+}
+
+/// Scan only the configured namespace for pre-marker state.
+async fn scan_namespace_state(valkey: &ValkeyConnection, namespace: &str) -> Result<NamespaceScan, BackendError> {
+    let generation = accounting_generation_key(namespace).into_bytes();
+    let pattern = format!("{}:v2:*", escape_scan_glob(namespace));
+    let mut cursor = 0_u64;
+    let mut result = NamespaceScan::default();
+    loop {
+        let mut scan = redis::pipe();
+        scan.cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(&pattern)
+            .arg("COUNT")
+            .arg(256);
+        let (reply,): (redis::Value,) = valkey.pipeline(&scan).await?;
+        let (next, keys): (u64, Vec<Vec<u8>>) =
+            redis::from_redis_value(reply).map_err(|_error| BackendError::InvalidResponse)?;
+        for key in keys {
+            if key == generation {
+                continue;
+            }
+            if !is_accounting_config_key(namespace, &key) {
+                result.unmarked_state = true;
+            }
+        }
+        if next == 0 {
+            return Ok(result);
+        }
+        cursor = next;
+    }
+}
+
+/// Escape a namespace before embedding it in a Valkey glob pattern.
+fn escape_scan_glob(namespace: &str) -> String {
+    let mut escaped = String::with_capacity(namespace.len());
+    for character in namespace.chars() {
+        if matches!(character, '\\' | '*' | '?' | '[') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+/// Recognize a marker key without treating quota state as managed merely
+/// because it shares the namespace prefix.
+fn is_accounting_config_key(namespace: &str, key: &[u8]) -> bool {
+    let prefix = format!("{namespace}:v2:");
+    let Some(suffix) = key.strip_prefix(prefix.as_bytes()) else {
+        return false;
+    };
+    (suffix.starts_with(b"sw:rule:") || suffix.starts_with(b"tb:rule:")) && suffix.ends_with(b":accounting-config")
 }
 
 /// Atomically claim an empty state generation, or validate its marker.
@@ -264,8 +383,10 @@ pub(super) fn ensure_accounting_config<'a>(
 /// The marker and the per-rule retained-key index are watched together. If
 /// the marker is absent but the index already exists, this is state written by
 /// a pre-marker v2 writer; claiming it would make the new policy reinterpret
-/// live quota, so the caller fails closed instead. A concurrent legacy writer
-/// changing the index aborts the claim and is retried.
+/// live quota, so the caller fails closed instead. Every quota key's lifetime
+/// is covered by that index, and settlements refresh the index before
+/// re-arming quota state. A concurrent legacy writer changing the index aborts
+/// the claim and is retried.
 async fn ensure_accounting_config_attempt(
     connection: &mut MultiplexedConnection,
     marker: &str,

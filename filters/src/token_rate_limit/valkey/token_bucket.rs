@@ -34,7 +34,7 @@
 //!   HSET {bucket} tokens last_refill_ms ; PEXPIRE {bucket} NX ; PEXPIRE {bucket} GT
 //!   SET {bucket}:r:{id} "estimate|now" PX timeout
 //!   ZADD active deadline "rk|id" ; PEXPIRE active NX ; PEXPIRE active GT
-//!   ZADD keys expiry rk ; PEXPIRE keys NX ; PEXPIRE keys GT
+//!   ZADD keys GT expiry rk ; PEXPIRE keys NX ; PEXPIRE keys GT
 //! EXEC                          (nil: back off and retry)
 //! ```
 //!
@@ -304,6 +304,7 @@ impl ValkeyTokenBucketBackend {
         let state_index = self.keys_key();
         ensure_accounting_config(
             &self.valkey,
+            &self.namespace,
             &self.accounting_config_key(),
             &self.config_fingerprint,
             &state_index,
@@ -403,7 +404,7 @@ impl ValkeyTokenBucketBackend {
         H: FnMut(u32) -> F + Send,
         F: Future<Output = ()> + Send,
     {
-        self.ensure_accounting_config().await?;
+        Box::pin(self.ensure_accounting_config()).await?;
         let mut retry = AbortRetry::start();
         let mut attempt = 0_u32;
         loop {
@@ -556,14 +557,22 @@ impl ValkeyTokenBucketBackend {
             .arg(format!("{}|{reservation_id}", bucket.id))
             .ignore();
         extend_shared_ttl(&mut pipe, &active_index, ttl_ms);
+        self.retain_key(&mut pipe, &bucket.id, bucket.now_ms);
+        pipe
+    }
+
+    /// Record a bucket's latest state deadline without shortening an existing
+    /// deadline, and keep the retained-key index alive for that state.
+    fn retain_key(&self, pipe: &mut redis::Pipeline, key_id: &str, now_ms: u64) {
         let keys = self.keys_key();
+        let ttl_ms = self.state_ttl_ms();
         pipe.cmd("ZADD")
             .arg(&keys)
-            .arg(bucket.now_ms.saturating_add(ttl_ms))
-            .arg(&bucket.id)
+            .arg("GT")
+            .arg(now_ms.saturating_add(ttl_ms))
+            .arg(key_id)
             .ignore();
-        extend_shared_ttl(&mut pipe, &keys, ttl_ms);
-        pipe
+        extend_shared_ttl(pipe, &keys, ttl_ms);
     }
 
     /// Record and report a committed admission.
@@ -635,14 +644,13 @@ impl ValkeyTokenBucketBackend {
     }
 
     /// The `MULTI` block settling `reservation_id` to a balance of `tokens`
-    /// and retiring the reservation. `write_bucket` re-arms the bucket's
-    /// own TTL, but not the `keys` zset's score for this key, so a bucket
-    /// can outlive its keys-index entry by up to `reservation_timeout`
-    /// (bounded, and affects only cap bookkeeping, not correctness).
+    /// and retiring the reservation. The bucket and retained-key index are
+    /// re-armed together so the index remains evidence of live quota state.
     fn settlement_pipeline(&self, bucket: &Bucket, reservation_id: u64, tokens: f64) -> redis::Pipeline {
         let mut pipe = redis::pipe();
         pipe.atomic();
         self.write_bucket(&mut pipe, bucket, tokens);
+        self.retain_key(&mut pipe, &bucket.id, bucket.now_ms);
         pipe.cmd("DEL")
             .arg(Self::reservation_key(&bucket.key, reservation_id))
             .ignore();
@@ -672,7 +680,7 @@ impl TokenRateLimitStateBackend for ValkeyTokenBucketBackend {
         reason = "transaction.finish() consumes the connection; the lint misidentifies the borrow across .await as a retained drop"
     )]
     async fn reconcile(&self, request: ReconcileRequest) -> Result<BackendSettlement, BackendError> {
-        self.ensure_accounting_config().await?;
+        Box::pin(self.ensure_accounting_config()).await?;
         let mut retry = AbortRetry::start();
         loop {
             let mut transaction = self.valkey.transaction().await?;
@@ -927,6 +935,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the reconciliation test verifies exactly-once settlement and index lifetime together"
+    )]
     async fn live_valkey_bucket_reconcile_refunds_once_and_repeats_are_noops() {
         let Some(backend) = backend("tb-reconcile", 100, 1.0, 5_000) else {
             return;
@@ -936,6 +948,9 @@ mod tests {
         else {
             panic!("admitted");
         };
+        let mut shorten = redis::pipe();
+        shorten.cmd("PEXPIRE").arg(backend.keys_key()).arg(50).ignore();
+        let () = backend.valkey.pipeline(&shorten).await.unwrap();
         let settle = || backend.reconcile(reconcile("alice", reservation_id, 40, now));
         let applied = BackendSettlement::Applied {
             actual: 40,
@@ -943,6 +958,16 @@ mod tests {
             overage: 0,
         };
         assert_eq!(settle().await.unwrap(), applied, "the unused 20 tokens are refunded");
+        let mut ttl_pipe = redis::pipe();
+        ttl_pipe.cmd("PTTL").arg(backend.keys_key());
+        let (keys_ttl,): (i64,) = backend.valkey.pipeline(&ttl_pipe).await.unwrap();
+        let expected_min = i64::try_from(backend.state_ttl_ms())
+            .unwrap_or(i64::MAX)
+            .saturating_sub(1_000);
+        assert!(
+            keys_ttl > expected_min,
+            "settlement must re-arm the retained-key index with live quota state: {keys_ttl} <= {expected_min}"
+        );
         assert_eq!(
             settle().await.unwrap(),
             BackendSettlement::Noop,
@@ -1152,6 +1177,7 @@ mod tests {
             return;
         };
         let now = 1_000_000;
+        backend.ensure_accounting_config().await.unwrap();
         let mut pipe = redis::pipe();
         pipe.cmd("HSET")
             .arg(backend.bucket_key(&backend.key_id("alice")))

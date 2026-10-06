@@ -942,9 +942,11 @@ pub(super) struct BackendConfig {
     /// buckets. The fingerprint also includes the compiled estimation
     /// strategy and effective token-type weights, but never request-derived
     /// values such as one request's `max_tokens`. A missing marker is
-    /// initialized only when the per-rule retained-key index is absent;
-    /// pre-marker `v2` state fails closed and requires a new namespace
-    /// generation rather than being silently adopted.
+    /// initialized only inside a namespace generation with no unmarked `v2`
+    /// keys; pre-marker state fails closed and leaves a persistent tombstone
+    /// that requires a new namespace generation rather than being silently
+    /// adopted. This protects against quota state surviving an expiring
+    /// per-rule retained-key index.
     ///
     /// To make an intentional semantic change, quiesce the old generation,
     /// cut every writer over to a new namespace generation, and only then
