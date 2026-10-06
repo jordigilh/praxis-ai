@@ -263,10 +263,7 @@ pub(super) async fn ensure_accounting_config(
     expected: &str,
     state_index: &str,
 ) -> Result<(), BackendError> {
-    ensure_accounting_generation(valkey, namespace).await?;
-    let mut marker_read = redis::pipe();
-    marker_read.cmd("GET").arg(marker);
-    let (stored,): (Option<String>,) = valkey.pipeline(&marker_read).await?;
+    let stored = read_accounting_marker(valkey, namespace, marker).await?;
     if let Some(stored) = stored {
         return validate_accounting_config(Some(&stored), expected);
     }
@@ -288,6 +285,29 @@ pub(super) async fn ensure_accounting_config(
             },
         }
         retry.pause().await?;
+    }
+}
+
+/// Read both persistent markers together on the normal reserve/reconcile path.
+async fn read_accounting_marker(
+    valkey: &ValkeyConnection,
+    namespace: &str,
+    marker: &str,
+) -> Result<Option<String>, BackendError> {
+    let generation = accounting_generation_key(namespace);
+    let mut marker_read = redis::pipe();
+    marker_read.cmd("GET").arg(&generation);
+    marker_read.cmd("GET").arg(marker);
+    let (generation_stored, stored): (Option<String>, Option<String>) = valkey.pipeline(&marker_read).await?;
+    match generation_stored.as_deref() {
+        Some(ACCOUNTING_GENERATION_VALUE) => Ok(stored),
+        Some(_) => Err(BackendError::ConfigurationMismatch),
+        None => {
+            ensure_accounting_generation(valkey, namespace).await?;
+            // Bootstrap can race with marker deletion; let the transactional
+            // path re-read and validate the rule marker before proceeding.
+            Ok(None)
+        },
     }
 }
 
@@ -756,27 +776,35 @@ mod tests {
     #[test]
     fn bootstrap_helpers_only_accept_exact_accounting_marker_keys() {
         let hash = "a".repeat(64);
-        assert!(is_accounting_config_key(
-            "ns",
-            format!("ns:v2:sw:rule:{hash}:accounting-config").as_bytes()
-        ));
-        assert!(is_accounting_config_key(
-            "ns",
-            format!("ns:v2:tb:rule:{hash}:accounting-config").as_bytes()
-        ));
-        assert!(!is_accounting_config_key(
-            "ns",
-            b"ns:v2:sw:rule:not-a-hash:accounting-config"
-        ));
-        assert!(!is_accounting_config_key(
-            "ns",
-            b"ns:v2:sw:rule:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:accounting-config"
-        ));
-        assert!(!is_accounting_config_key(
-            "ns",
-            b"ns:v2:sw:rule:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:other"
-        ));
-        assert_eq!(escape_scan_glob(r"ns*?[\"), r"ns\*\?\[\\");
+        for (algorithm, message) in [
+            ("sw", "sliding-window accounting markers use the recognized key shape"),
+            ("tb", "token-bucket accounting markers use the recognized key shape"),
+        ] {
+            let key = format!("ns:v2:{algorithm}:rule:{hash}:accounting-config");
+            assert!(is_accounting_config_key("ns", key.as_bytes()), "{message}");
+        }
+        let invalid_keys: &[(&[u8], &str)] = &[
+            (
+                b"ns:v2:sw:rule:not-a-hash:accounting-config",
+                "non-hex rule identifiers are not recognized as accounting markers",
+            ),
+            (
+                b"ns:v2:sw:rule:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:accounting-config",
+                "short rule hashes are not recognized as accounting markers",
+            ),
+            (
+                b"ns:v2:sw:rule:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:other",
+                "accounting markers require the exact suffix",
+            ),
+        ];
+        for (key, message) in invalid_keys {
+            assert!(!is_accounting_config_key("ns", key), "{message}");
+        }
+        assert_eq!(
+            escape_scan_glob(r"ns*?[\"),
+            r"ns\*\?\[\\",
+            "namespace glob metacharacters must be escaped for SCAN"
+        );
     }
 
     #[test]
