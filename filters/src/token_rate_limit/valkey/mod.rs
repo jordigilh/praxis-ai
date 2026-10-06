@@ -14,7 +14,10 @@
 //! delete it in a transaction that `WATCH` aborts when another settlement
 //! got there first.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::{
+    future::Future,
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+};
 
 use praxis_ai_apis::hash::Sha256;
 use redis::aio::MultiplexedConnection;
@@ -219,38 +222,41 @@ pub(super) fn accounting_config_key(namespace: &str, algorithm: &str, rule: &str
 }
 
 /// Initialize or validate a persistent accounting configuration marker before
-/// a backend touches quota state.
-pub(super) async fn ensure_accounting_config(
-    valkey: &ValkeyConnection,
-    marker: &str,
-    expected: &str,
-    state_index: &str,
-) -> Result<(), BackendError> {
-    let mut marker_read = redis::pipe();
-    marker_read.cmd("GET").arg(marker);
-    let (stored,): (Option<String>,) = valkey.pipeline(&marker_read).await?;
-    if let Some(stored) = stored {
-        return validate_accounting_config(Some(&stored), expected);
-    }
-
-    let mut retry = AbortRetry::start();
-    loop {
-        let mut transaction = valkey.transaction().await?;
-        let outcome = ensure_accounting_config_attempt(transaction.inner(), marker, expected, state_index).await;
-        match outcome {
-            Ok(outcome) => {
-                transaction.finish().await;
-                if let Some(()) = outcome {
-                    return Ok(());
-                }
-            },
-            Err(error) => {
-                drop(transaction);
-                return Err(error);
-            },
+/// a backend touches quota state. The future is boxed at this boundary because
+/// the marker transaction and retry state exceed the stack-frame lint threshold.
+pub(super) fn ensure_accounting_config<'a>(
+    valkey: &'a ValkeyConnection,
+    marker: &'a str,
+    expected: &'a str,
+    state_index: &'a str,
+) -> impl Future<Output = Result<(), BackendError>> + 'a {
+    Box::pin(async move {
+        let mut marker_read = redis::pipe();
+        marker_read.cmd("GET").arg(marker);
+        let (stored,): (Option<String>,) = valkey.pipeline(&marker_read).await?;
+        if let Some(stored) = stored {
+            return validate_accounting_config(Some(&stored), expected);
         }
-        retry.pause().await?;
-    }
+
+        let mut retry = AbortRetry::start();
+        loop {
+            let mut transaction = valkey.transaction().await?;
+            let outcome = ensure_accounting_config_attempt(transaction.inner(), marker, expected, state_index).await;
+            match outcome {
+                Ok(outcome) => {
+                    transaction.finish().await;
+                    if let Some(()) = outcome {
+                        return Ok(());
+                    }
+                },
+                Err(error) => {
+                    drop(transaction);
+                    return Err(error);
+                },
+            }
+            retry.pause().await?;
+        }
+    })
 }
 
 /// Atomically claim an empty state generation, or validate its marker.

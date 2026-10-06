@@ -638,7 +638,7 @@ fn next_i64(values: &mut impl Iterator<Item = redis::Value>) -> Result<i64, Back
 #[async_trait]
 impl TokenRateLimitStateBackend for ValkeySlidingWindowBackend {
     async fn reserve(&self, request: ReserveRequest) -> Result<BackendReserve, BackendError> {
-        Box::pin(self.ensure_accounting_config()).await?;
+        self.ensure_accounting_config().await?;
         let id = self.key_id(&request.key);
         let reads = Box::pin(self.read_window(&id, request.now_ms)).await?;
         let (keys_after, active_after) = (reads.keys, reads.active);
@@ -675,7 +675,7 @@ impl TokenRateLimitStateBackend for ValkeySlidingWindowBackend {
         reason = "transaction.finish() consumes the connection after the borrowed attempt"
     )]
     async fn reconcile(&self, request: ReconcileRequest) -> Result<BackendSettlement, BackendError> {
-        Box::pin(self.ensure_accounting_config()).await?;
+        self.ensure_accounting_config().await?;
         let mut retry = AbortRetry::start();
         loop {
             let mut transaction = self.valkey.transaction().await?;

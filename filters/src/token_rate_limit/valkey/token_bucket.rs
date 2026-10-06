@@ -403,7 +403,7 @@ impl ValkeyTokenBucketBackend {
         H: FnMut(u32) -> F + Send,
         F: Future<Output = ()> + Send,
     {
-        Box::pin(self.ensure_accounting_config()).await?;
+        self.ensure_accounting_config().await?;
         let mut retry = AbortRetry::start();
         let mut attempt = 0_u32;
         loop {
@@ -672,7 +672,7 @@ impl TokenRateLimitStateBackend for ValkeyTokenBucketBackend {
         reason = "transaction.finish() consumes the connection; the lint misidentifies the borrow across .await as a retained drop"
     )]
     async fn reconcile(&self, request: ReconcileRequest) -> Result<BackendSettlement, BackendError> {
-        Box::pin(self.ensure_accounting_config()).await?;
+        self.ensure_accounting_config().await?;
         let mut retry = AbortRetry::start();
         loop {
             let mut transaction = self.valkey.transaction().await?;
