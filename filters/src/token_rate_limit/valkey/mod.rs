@@ -14,7 +14,10 @@
 //! delete it in a transaction that `WATCH` aborts when another settlement
 //! got there first.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::{
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    time::Instant,
+};
 
 use praxis_ai_apis::hash::Sha256;
 use redis::aio::MultiplexedConnection;
@@ -233,6 +236,18 @@ const ACCOUNTING_GENERATION_VALUE: &str = ACCOUNTING_CONFIG_SCHEMA;
 /// namespace; recovery requires a new namespace generation.
 const LEGACY_STATE_GENERATION_VALUE: &str = "legacy-v2-state";
 
+/// Maximum number of keys inspected while bootstrapping a namespace. A
+/// namespace beyond this bound fails closed rather than adopting state from a
+/// partial scan.
+const MAX_BOOTSTRAP_SCAN_KEYS: usize = 100_000;
+
+/// Maximum number of cursor rounds allowed during namespace bootstrap. This
+/// bounds latency even when SCAN returns fewer keys than its COUNT hint.
+const MAX_BOOTSTRAP_SCAN_ROUNDS: usize = 1_024;
+
+/// Hint for each namespace-bootstrap cursor round.
+const BOOTSTRAP_SCAN_COUNT: usize = 256;
+
 /// Initialize or validate a persistent accounting configuration marker before
 /// a backend touches quota state. Callers box this future before awaiting it;
 /// the marker transaction and retry state are inherently larger than the
@@ -325,22 +340,41 @@ struct NamespaceScan {
 }
 
 /// Scan only the configured namespace for pre-marker state.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the bounded cursor scan keeps its safety checks adjacent to the key classification"
+)]
 async fn scan_namespace_state(valkey: &ValkeyConnection, namespace: &str) -> Result<NamespaceScan, BackendError> {
     let generation = accounting_generation_key(namespace).into_bytes();
     let pattern = format!("{}:v2:*", escape_scan_glob(namespace));
     let mut cursor = 0_u64;
+    let started = Instant::now();
+    let mut rounds = 0_usize;
+    let mut scanned_keys = 0_usize;
     let mut result = NamespaceScan::default();
     loop {
+        if rounds >= MAX_BOOTSTRAP_SCAN_ROUNDS || started.elapsed() >= VALKEY_TIMEOUT {
+            return Err(BackendError::Unavailable(
+                "Valkey namespace bootstrap scan exceeded its safety bound".into(),
+            ));
+        }
+        rounds += 1;
         let mut scan = redis::pipe();
         scan.cmd("SCAN")
             .arg(cursor)
             .arg("MATCH")
             .arg(&pattern)
             .arg("COUNT")
-            .arg(256);
+            .arg(BOOTSTRAP_SCAN_COUNT);
         let (reply,): (redis::Value,) = valkey.pipeline(&scan).await?;
         let (next, keys): (u64, Vec<Vec<u8>>) =
             redis::from_redis_value(reply).map_err(|_error| BackendError::InvalidResponse)?;
+        scanned_keys = scanned_keys.saturating_add(keys.len());
+        if scanned_keys > MAX_BOOTSTRAP_SCAN_KEYS {
+            return Err(BackendError::Unavailable(
+                "Valkey namespace bootstrap scan found too many keys".into(),
+            ));
+        }
         for key in keys {
             if key == generation {
                 continue;
@@ -375,7 +409,14 @@ fn is_accounting_config_key(namespace: &str, key: &[u8]) -> bool {
     let Some(suffix) = key.strip_prefix(prefix.as_bytes()) else {
         return false;
     };
-    (suffix.starts_with(b"sw:rule:") || suffix.starts_with(b"tb:rule:")) && suffix.ends_with(b":accounting-config")
+    let Some(rule_hash) = suffix
+        .strip_prefix(b"sw:rule:")
+        .or_else(|| suffix.strip_prefix(b"tb:rule:"))
+        .and_then(|suffix| suffix.strip_suffix(b":accounting-config"))
+    else {
+        return false;
+    };
+    rule_hash.len() == 64 && rule_hash.iter().all(u8::is_ascii_hexdigit)
 }
 
 /// Atomically claim an empty state generation, or validate its marker.
@@ -440,7 +481,7 @@ mod token_bucket;
 mod window;
 
 pub(super) use connection::ValkeyConnection;
-use connection::{AbortRetry, command_error, unwatch};
+use connection::{AbortRetry, VALKEY_TIMEOUT, command_error, unwatch};
 pub(super) use sliding_window::{ValkeySlidingWindowBackend, ValkeySlidingWindowConfig};
 pub(super) use token_bucket::{ValkeyTokenBucketBackend, ValkeyTokenBucketConfig};
 
@@ -529,8 +570,9 @@ pub(super) fn amount(value: i64) -> Result<u64, BackendError> {
 #[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::{
-        BackendError, RuleTelemetry, accounting_config_key, amount, count, key_hash, parse_reservation,
-        sliding_window_config_fingerprint, token_bucket_config_fingerprint, validate_accounting_config,
+        BackendError, RuleTelemetry, accounting_config_key, amount, count, escape_scan_glob, is_accounting_config_key,
+        key_hash, parse_reservation, sliding_window_config_fingerprint, token_bucket_config_fingerprint,
+        validate_accounting_config,
     };
     use crate::token_rate_limit::{AccountingPolicy, CompiledEstimation, ledger::Budget, weights::TokenWeights};
 
@@ -709,6 +751,32 @@ mod tests {
             ),
             "missing accounting markers are treated as invalid responses"
         );
+    }
+
+    #[test]
+    fn bootstrap_helpers_only_accept_exact_accounting_marker_keys() {
+        let hash = "a".repeat(64);
+        assert!(is_accounting_config_key(
+            "ns",
+            format!("ns:v2:sw:rule:{hash}:accounting-config").as_bytes()
+        ));
+        assert!(is_accounting_config_key(
+            "ns",
+            format!("ns:v2:tb:rule:{hash}:accounting-config").as_bytes()
+        ));
+        assert!(!is_accounting_config_key(
+            "ns",
+            b"ns:v2:sw:rule:not-a-hash:accounting-config"
+        ));
+        assert!(!is_accounting_config_key(
+            "ns",
+            b"ns:v2:sw:rule:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:accounting-config"
+        ));
+        assert!(!is_accounting_config_key(
+            "ns",
+            b"ns:v2:sw:rule:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:other"
+        ));
+        assert_eq!(escape_scan_glob(r"ns*?[\"), r"ns\*\?\[\\");
     }
 
     #[test]

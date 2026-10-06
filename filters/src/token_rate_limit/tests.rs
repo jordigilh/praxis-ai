@@ -1773,8 +1773,13 @@ async fn valkey_unmarked_v2_quota_state_without_index_fails_closed_with_503() {
     .unwrap();
     let key_id = super::valkey::key_hash(&[namespace.as_bytes(), b"default", b"legacy-key"]);
     let usage_key = format!("{namespace}:v2:{key_id}:u60000:{}", now_ms / 60_000);
+    let marker_key = format!(
+        "{namespace}:v2:sw:rule:{}:accounting-config",
+        super::valkey::key_hash(&[b"default"])
+    );
     let connection = super::valkey::ValkeyConnection::new(url.clone()).unwrap();
     let mut pipe = redis::pipe();
+    pipe.cmd("SET").arg(marker_key).arg("v3:legacy-test").ignore();
     pipe.cmd("SET").arg(&usage_key).arg(5).arg("PX").arg(600_000).ignore();
     let () = connection.pipeline(&pipe).await.unwrap();
 
