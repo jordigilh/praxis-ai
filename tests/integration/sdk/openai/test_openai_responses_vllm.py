@@ -24,6 +24,7 @@ Usage:
 import base64
 from concurrent.futures import ThreadPoolExecutor
 import io
+from itertools import islice
 import json
 import os
 import signal
@@ -286,6 +287,7 @@ def _write_full_flow_config(
     *,
     backend_endpoint: str | None = None,
     search_port: int | None = None,
+    nemo_port: int | None = None,
     max_event_bytes: int | None = None,
 ) -> str:
     """Patch the shared full-flow example for live or recording backends."""
@@ -308,6 +310,13 @@ def _write_full_flow_config(
             "api_key: test-key\n"
             f"                base_url: http://127.0.0.1:{search_port}\n"
             "                # Require the per-user key",
+        )
+    if nemo_port is not None:
+        nemo_anchor = "http://127.0.0.1:3003/v1/checks"
+        assert config.count(nemo_anchor) == 1
+        config = config.replace(
+            nemo_anchor,
+            f"http://127.0.0.1:{nemo_port}/v1/checks",
         )
     if max_event_bytes is not None:
         anchor = (
@@ -731,6 +740,36 @@ class BraveSearchHandler(BaseHTTPRequestHandler):
                 }
             }
         ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+class NemoGuardrailsHandler(BaseHTTPRequestHandler):
+    """Passing NeMo `/v1/checks` mock used by the full-flow SDK tests."""
+
+    #: Total `/v1/checks` requests served across all instances since the last reset.
+    request_count: ClassVar[int] = 0
+    requests: ClassVar[list[dict[str, Any]]] = []
+    lock: ClassVar[threading.Lock] = threading.Lock()
+
+    @classmethod
+    def reset(cls):
+        with cls.lock:
+            cls.requests.clear()
+            cls.request_count = 0
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        with self.lock:
+            type(self).requests.append(json.loads(body))
+            type(self).request_count += 1
+        payload = json.dumps({"status": "passed", "content": "safe"}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
@@ -1795,7 +1834,7 @@ def compact_proxy(tmp_path_factory, request, compaction_server):
 
 
 def _witness_proxy_session(
-    tmp_path_factory, request, search_port=None, max_event_bytes=None
+    tmp_path_factory, request, search_port=None, max_event_bytes=None, nemo_port=None
 ):
     """Start a proxy whose native backend is a recording shim in front of vLLM.
 
@@ -1820,6 +1859,7 @@ def _witness_proxy_session(
         db_path,
         backend_endpoint=f"127.0.0.1:{backend_port}",
         search_port=search_port,
+        nemo_port=nemo_port,
         max_event_bytes=max_event_bytes,
     )
     binary = _find_binary()
@@ -1864,16 +1904,37 @@ def witness_backend_client(tmp_path_factory, request):
 
 
 @pytest.fixture()
-def witness_tool_client(tmp_path_factory, request, search_server):
-    """Full-flow witness with a deterministic hosted web-search endpoint."""
-    yield from _witness_proxy_session(tmp_path_factory, request, search_server)
+def witness_backend_tool_client(tmp_path_factory, request, nemo_guardrails_server):
+    """Witness proxy whose IRR tool-result guardrail has a reachable NeMo endpoint.
+
+    A request-side tool-limit completion still produces a (failed) tool result
+    that the full-flow guardrail screens before re-entry, so the phase needs a
+    live endpoint even though no hosted search is dispatched.
+    """
+    yield from _witness_proxy_session(
+        tmp_path_factory, request, nemo_port=nemo_guardrails_server
+    )
 
 
 @pytest.fixture()
-def witness_replay_limited_tool_client(tmp_path_factory, request, search_server):
+def witness_tool_client(tmp_path_factory, request, search_server, nemo_guardrails_server):
+    """Full-flow witness with a deterministic hosted web-search endpoint."""
+    yield from _witness_proxy_session(
+        tmp_path_factory, request, search_server, nemo_port=nemo_guardrails_server
+    )
+
+
+@pytest.fixture()
+def witness_replay_limited_tool_client(
+    tmp_path_factory, request, search_server, nemo_guardrails_server
+):
     """Hosted web-search witness whose Response replay limit is one byte."""
     yield from _witness_proxy_session(
-        tmp_path_factory, request, search_server, max_event_bytes=1
+        tmp_path_factory,
+        request,
+        search_server,
+        max_event_bytes=1,
+        nemo_port=nemo_guardrails_server,
     )
 
 
@@ -2311,6 +2372,18 @@ class TestOpenAIResponsesVLLM:
         assert next_page.has_more is False
         assert "Repeat the marker" in next_page.data[0].content[0].text
 
+        desc_page = openai_client.responses.input_items.list(
+            response.id,
+            limit=1,
+            order="desc",
+        )
+        assert desc_page.object == "list"
+        assert len(desc_page.data) == 1
+        assert desc_page.first_id == desc_page.data[0].id
+        assert desc_page.last_id == desc_page.data[-1].id
+        assert desc_page.first_id == next_page.data[0].id
+        assert desc_page.has_more is True
+
         assert openai_client.responses.delete(response.id) is None
         with pytest.raises(NotFoundError) as exc_info:
             openai_client.responses.retrieve(response.id)
@@ -2318,6 +2391,42 @@ class TestOpenAIResponsesVLLM:
         with pytest.raises(NotFoundError) as exc_info:
             openai_client.responses.input_items.list(response.id)
         assert exc_info.value.status_code == 404
+
+    def test_duplicate_input_item_ids_auto_paginate(self, witness_backend_client):
+        client, _forwarded = witness_backend_client
+        response = client.responses.create(
+            model="sdk-conversation-stream",
+            input=[
+                {"type": "item_reference", "id": "dup"},
+                {"type": "item_reference", "id": "dup"},
+                {"type": "item_reference", "id": "c"},
+            ],
+            store=True,
+            max_output_tokens=16,
+        )
+
+        first = client.responses.input_items.list(
+            response.id,
+            limit=1,
+            order="asc",
+        )
+        pages = list(islice(first.iter_pages(), 3))
+        assert len(pages) == 2, (
+            "SDK pagination must advance past an ambiguous duplicate target and terminate"
+        )
+        assert all(len(page.data) == 1 for page in pages), (
+            "the requested one-item page size must remain stable during SDK iteration"
+        )
+        ids = [page.data[0].id for page in pages]
+        assert ids == ["dup", "c"], (
+            "SDK-derived after=dup must reach the later unique item without rewriting the reference target"
+        )
+        assert all(page.last_id == page.data[-1].id for page in pages), (
+            "the documented last_id field must remain the final returned item ID"
+        )
+        assert pages[-1].has_more is False, (
+            "SDK pagination must terminate after reaching the final unique item"
+        )
 
     def test_response_resource_not_found_errors(self, openai_client):
         missing_id = "resp_missing_sdk_integration"
@@ -2640,6 +2749,8 @@ class TestOpenAIResponsesVLLM:
         client, forwarded = witness_tool_client
         conversation = client.conversations.create()
         searches_before = BraveSearchHandler.request_count
+        with NemoGuardrailsHandler.lock:
+            nemo_before = NemoGuardrailsHandler.request_count
         try:
             events = list(
                 client.responses.create(
@@ -2658,6 +2769,12 @@ class TestOpenAIResponsesVLLM:
             output = completed[0].response.output
             assert [item.type for item in output] == ["web_search_call", "message"]
             assert BraveSearchHandler.request_count == searches_before + 1
+            with NemoGuardrailsHandler.lock:
+                assert NemoGuardrailsHandler.request_count == nemo_before + 1
+                nemo_request = NemoGuardrailsHandler.requests[-1]
+            assert "Mock Search Result" in json.dumps(nemo_request["messages"]), (
+                "NeMo must inspect the hosted search result before model re-entry"
+            )
             assert len(forwarded) == 2, "one tool dispatch should produce one re-entry"
             assert "Mock Search Result" in json.dumps(forwarded[1]["input"])
 
@@ -2821,10 +2938,10 @@ class TestOpenAIResponsesVLLM:
                 stream.close()
 
     def test_streamed_local_completion_append_failure_withholds_terminal(
-        self, witness_backend_client
+        self, witness_backend_tool_client
     ):
         """A request-side tool-limit completion must append before its SSE terminal."""
-        client, _ = witness_backend_client
+        client, _ = witness_backend_tool_client
         conversation = client.conversations.create()
         gate = threading.Event()
         ResponsesWitnessHandler.terminal_gate = gate
@@ -3463,7 +3580,7 @@ class TestOpenAIResponsesVLLM:
         assert error.body == {
             "code": "invalid_request_error",
             "message": (
-                "prompt templates are supported only for OpenAI-owned upstreams"
+                "prompt templates are supported only for OpenAI-owned upstreams; send prompt content via input (OpenAI deprecated reusable prompts)"
             ),
             "param": None,
             "type": "invalid_request_error",
@@ -3977,7 +4094,7 @@ class TestResponsesCompactionVLLM:
         assert error.status_code == 400
         assert error.type == "invalid_request_error"
         assert error.body["message"] == (
-            "prompt templates are supported only for OpenAI-owned upstreams"
+            "prompt templates are supported only for OpenAI-owned upstreams; send prompt content via input (OpenAI deprecated reusable prompts)"
         )
 
     def test_invalid_compaction_threshold_is_rejected(self, compact_client):
@@ -3995,6 +4112,48 @@ class TestResponsesCompactionVLLM:
             )
         assert exc_info.value.status_code == 400, "invalid compaction threshold must return 400"
         assert "compact_threshold" in str(exc_info.value), "error must name the compact_threshold field"
+
+    def test_explicit_compact_rejects_malformed_input_content(self, compact_client):
+        """Issue #1403: a message item whose ``content`` is wrong-typed must fail
+        with 400 before any summarization callout, not be silently formatted into
+        empty text and compacted/stored anyway.
+
+        ``extra_body`` injects the malformed field verbatim so the request body
+        carries ``content: 123``, which the typed ``input`` parameter would not
+        let a caller express.
+        """
+        before = len(CompactionHandler.requests)
+        with pytest.raises(BadRequestError) as exc_info:
+            compact_client.responses.compact(
+                model=VLLM_MODEL,
+                extra_body={"input": [{"role": "user", "content": 123}]},
+            )
+
+        error = exc_info.value
+        assert error.status_code == 400, "malformed content must return 400"
+        assert error.type == "invalid_request_error"
+        assert "content" in str(error), "error must name the offending field"
+        assert len(CompactionHandler.requests) == before, (
+            "a rejected malformed-content request must never reach the summarizer"
+        )
+
+    def test_explicit_compact_valid_input_makes_one_callout(self, compact_client):
+        """Control for the #1403 rejection: a well-typed inline input compacts
+        with exactly one summarization callout and returns a compaction object."""
+        before = len(CompactionHandler.requests)
+        result = compact_client.responses.compact(
+            model=VLLM_MODEL,
+            input=[
+                {"role": "user", "content": "Explain TCP vs UDP."},
+                {"role": "assistant", "content": "TCP is reliable; UDP is not."},
+            ],
+        )
+
+        assert result.id, "a successful compact returns an identified compaction"
+        assert result.object == "response.compaction"
+        assert len(CompactionHandler.requests) == before + 1, (
+            "a valid explicit compact must make exactly one summarization callout"
+        )
 
     def test_below_threshold_skips_compaction(self, compact_client):
         first = compact_client.responses.create(
@@ -4857,6 +5016,18 @@ def search_server():
 
 
 @pytest.fixture(scope="session")
+def nemo_guardrails_server():
+    """Start a deterministic passing NeMo mock for guarded SDK tool tests."""
+    NemoGuardrailsHandler.reset()
+    port = _free_port()
+    server = ThreadingHTTPServer(("127.0.0.1", port), NemoGuardrailsHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield port
+    server.shutdown()
+
+
+@pytest.fixture(scope="session")
 def agentic_proxy(tmp_path_factory, request, mcp_server, search_server):
     """Start a Praxis proxy with the native Responses agentic loop."""
     port = _free_port()
@@ -5141,6 +5312,159 @@ class TestClientToolCompatVLLM:
         )
         # Request phase echo: the client sees its original ``custom`` tool back.
         assert any(t.type == "custom" for t in response.tools), response.tools
+
+    def test_shell_tool_round_trip_lowers_and_restores(
+        self, client_tool_compat_client
+    ):
+        """A local ``shell`` tool is lowered to a private ``function`` vLLM
+        accepts; the returned call is restored to a schema-complete
+        ``shell_call`` with its parsed action moved into the result."""
+        response = client_tool_compat_client.responses.create(
+            model=VLLM_MODEL,
+            input=(
+                "You MUST call the shell tool with the command: echo ok. "
+                "Do not answer directly. /no_think"
+            ),
+            tools=[{"type": "shell", "environment": {"type": "local"}}],
+            tool_choice={"type": "shell"},
+            temperature=0,
+            store=False,
+            max_output_tokens=256,
+        )
+
+        assert response.status == "completed", response
+        shell_calls = [item for item in response.output if item.type == "shell_call"]
+        assert len(shell_calls) >= 1, (
+            "compat filter must restore the function_call to a shell_call; "
+            f"got output types: {[i.type for i in response.output]}"
+        )
+        call = shell_calls[0]
+        assert call.call_id, call
+        assert call.action is not None, call
+        assert call.action.commands, (
+            "restored shell action must include commands: "
+            f"{call.action}"
+        )
+        assert all(command for command in call.action.commands), (
+            "every restored shell command must be non-empty: "
+            f"{call.action}"
+        )
+        assert (
+            call.action.timeout_ms is None or call.action.timeout_ms >= 0
+        ), call.action
+        assert (
+            call.action.max_output_length is None
+            or call.action.max_output_length >= 0
+        ), call.action
+        assert call.environment is not None, (
+            "restored shell call must include its environment: "
+            f"{call}"
+        )
+        assert call.environment.type == "local", (
+            "restored shell call must identify a local environment: "
+            f"{call.environment}"
+        )
+        assert all(item.type != "function_call" for item in response.output), (
+            f"lowered function must not leak: {[i.type for i in response.output]}"
+        )
+        assert any(t.type == "shell" for t in response.tools), response.tools
+
+    def test_tool_search_round_trip_lowers_and_restores(
+        self, client_tool_compat_client
+    ):
+        """A client-executed ``tool_search`` declaration is lowered to a private
+        ``function`` and its restored call preserves client ownership and parsed
+        arguments through the OpenAI SDK."""
+        response = client_tool_compat_client.responses.create(
+            model=VLLM_MODEL,
+            input=(
+                "You MUST call tool_search for client tools. Do not answer "
+                "directly. /no_think"
+            ),
+            tools=[{"type": "tool_search"}],
+            tool_choice="required",
+            temperature=0,
+            store=False,
+            max_output_tokens=256,
+        )
+
+        assert response.status == "completed", response
+        search_calls = [
+            item for item in response.output if item.type == "tool_search_call"
+        ]
+        assert len(search_calls) >= 1, (
+            "compat filter must restore the function_call to a tool_search_call; "
+            f"got output types: {[i.type for i in response.output]}"
+        )
+        call = search_calls[0]
+        assert call.call_id, call
+        assert call.execution == "client", call
+        assert call.arguments is not None, call
+        assert all(item.type != "function_call" for item in response.output), (
+            f"lowered function must not leak: {[i.type for i in response.output]}"
+        )
+        assert any(t.type == "tool_search" for t in response.tools), response.tools
+
+    def test_mcp_namespace_group_name_with_delimiter_is_accepted(
+        self, client_tool_compat_client
+    ):
+        """A ``namespace`` group whose name carries the ``__`` flattening
+        delimiter lowers rather than failing closed.
+
+        Codex names an MCP tool namespace ``mcp__{server}``, so the ``__`` the
+        compat filter uses to delimit its flattened
+        ``agentic_ns__{namespace}__{member}`` wire names appears inside the group
+        name itself. Reserving the delimiter rejected every Codex session that
+        attaches an MCP server with HTTP 400 before any upstream call; the
+        ambiguous pair now takes the hashed wire-name branch instead.
+
+        Asserts only filter-guaranteed, model-independent invariants: whether the
+        small CI model actually calls the member is model-dependent, so the test
+        does not require a live tool call.
+        """
+        response = client_tool_compat_client.responses.create(
+            model=VLLM_MODEL,
+            input="Read the hosts file. /no_think",
+            tools=[
+                {
+                    "type": "namespace",
+                    "name": "mcp__codex_tui",
+                    "description": "Codex MCP tools.",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "read_file",
+                            "description": "Read a file from the workspace.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"path": {"type": "string"}},
+                                "required": ["path"],
+                                "additionalProperties": False,
+                            },
+                        }
+                    ],
+                }
+            ],
+            temperature=0,
+            store=False,
+            max_output_tokens=256,
+        )
+
+        # Reaching a terminal response at all is the regression guard: pre-fix the
+        # compat filter rejected the group name with HTTP 400 (raised by the SDK as
+        # BadRequestError) before any upstream call.
+        assert response.status == "completed", response
+        # No private flattened wire name may leak to the client.
+        leaked = [
+            name
+            for name in (getattr(item, "name", None) for item in response.output)
+            if isinstance(name, str) and name.startswith("agentic_ns__")
+        ]
+        assert not leaked, f"lowered namespace wire name leaked: {leaked}"
+        # Request-phase echo: the client sees its original namespace tool back with
+        # the group name intact, delimiter and all.
+        echoed = [getattr(t, "name", None) for t in response.tools]
+        assert "mcp__codex_tui" in echoed, response.tools
 
     def test_single_round_declared_and_discovered_tools_lower_without_leaking(
         self, client_tool_compat_client
@@ -7297,7 +7621,13 @@ filter_chains:
   - name: file-search-pipeline
     filters:
       - filter: openai_responses_format
-      - filter: openai_responses_validate
+      - filter: openai_responses_request
+        on_invalid: reject
+        headers:
+          format: ~
+          model: ~
+          stream: ~
+          mode: ~
       - filter: openai_tool_parse
       - filter: iterative_request_router
         initial_step: inference

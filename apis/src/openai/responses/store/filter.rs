@@ -653,7 +653,7 @@ pub(super) fn extract_response_id(path: &str) -> Option<&str> {
 /// store filter that is absent, request-conditioned out, or ordered after
 /// dispatch.
 ///
-/// It is written from `on_request_body` because `openai_responses_validate`
+/// It is written from `on_request_body` because `openai_responses_request`
 /// creates `ResponsesState` in its own `on_request_body`, which runs earlier in
 /// the same body phase, so `ResponsesState` is not yet present during
 /// `on_request`.
@@ -1327,33 +1327,19 @@ fn build_input_items_response(
 
 /// Serialize a successful input items page into a 200 JSON response.
 fn build_input_items_ok(id: &str, page: &InputItemPage) -> FilterAction {
-    let first_id = page.data.first().and_then(|v| v.get("id")).and_then(|v| v.as_str());
-    // Items normally carry a synthetic ID (see `normalize_input_items`),
-    // but non-object array entries can't be tagged with one. Fall back
-    // to the page's numeric cursor so `after`-based pagination stays
-    // usable even for that edge case, instead of exposing a `null`
-    // `last_id` clients have no way to resume from.
-    let last_id = page
-        .data
-        .last()
-        .and_then(|v| v.get("id"))
-        .and_then(|v| v.as_str())
-        .or(page.next_cursor.as_deref());
-
-    let body = serde_json::json!({
-        "object": "list",
-        "data": page.data,
-        "has_more": page.has_more,
-        "first_id": first_id,
-        "last_id": last_id,
-    });
     debug!(
         response_id = id,
         count = page.data.len(),
         has_more = page.has_more,
         "serving input items"
     );
-    let bytes = serde_json::to_vec(&body).unwrap_or_default();
+    let bytes = match serde_json::to_vec(page) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            warn!(response_id = id, error = %e, "input_items serialization failed");
+            return FilterAction::Reject(reject_store_error());
+        },
+    };
     FilterAction::Reject(
         Rejection::status(200)
             .with_header("content-type", "application/json")
