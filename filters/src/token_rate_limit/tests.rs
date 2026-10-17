@@ -679,21 +679,21 @@ fn from_config_rejects_insecure_tls_configuration() {
 }
 
 #[test]
-fn from_config_rejects_a_plain_sentinel_endpoint_when_tls_is_enabled() {
+fn from_config_rejects_the_removed_sentinel_tls_flag() {
     let yaml = single_rule_yaml_with(
         "backend:\n  kind: redis\n  sentinel:\n    endpoints: [redis://127.0.0.1:26379]\n    service_name: mymaster\n    tls: true",
         "algorithm: sliding_window\nwindow: 1h\ncapacity: 100\nreserved_tokens: 5",
     );
     let Err(err) = TokenRateLimitFilter::from_config(&yaml) else {
-        panic!("TLS requires rediss Sentinel endpoints")
+        panic!("the removed Sentinel TLS flag must be rejected")
     };
-    assert!(err.to_string().contains("endpoint scheme"), "got: {err}");
+    assert!(err.to_string().contains("unknown field `tls`"), "got: {err}");
 }
 
 #[test]
 fn from_config_accepts_a_valkeys_tls_sentinel_endpoint() {
     let yaml = single_rule_yaml_with(
-        "backend:\n  kind: valkey\n  sentinel:\n    endpoints: [valkeys://127.0.0.1:26379]\n    service_name: mymaster\n    tls: true",
+        "backend:\n  kind: valkey\n  sentinel:\n    endpoints: [valkeys://127.0.0.1:26379]\n    service_name: mymaster",
         "algorithm: sliding_window\nwindow: 1h\ncapacity: 100\nreserved_tokens: 5",
     );
     assert!(TokenRateLimitFilter::from_config(&yaml).is_ok());

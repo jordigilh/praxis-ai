@@ -700,6 +700,10 @@ impl TokenRateLimitStateBackend for ValkeySlidingWindowBackend {
         reason = "transaction.finish() consumes the connection after the borrowed attempt"
     )]
     #[expect(
+        clippy::too_many_lines,
+        reason = "settlement owns the bounded transaction retry and outcome flow"
+    )]
+    #[expect(
         clippy::allow_attributes,
         reason = "this stack-frame allowance must work across supported Clippy versions"
     )]
@@ -716,9 +720,8 @@ impl TokenRateLimitStateBackend for ValkeySlidingWindowBackend {
                 .map_err(|_elapsed| BackendError::Unavailable("Valkey operation deadline exceeded".into()))??;
             if !transaction.is_current() {
                 drop(transaction);
-                return Err(BackendError::Unconfirmed(
-                    "Valkey transaction connection was invalidated".into(),
-                ));
+                retry.pause().await?;
+                continue;
             }
             let outcome = match tokio::time::timeout(
                 retry.remaining()?,
@@ -732,11 +735,18 @@ impl TokenRateLimitStateBackend for ValkeySlidingWindowBackend {
                     return Err(BackendError::Unconfirmed("Valkey operation deadline exceeded".into()));
                 },
             };
-            if !transaction.finish().await {
-                return Err(BackendError::Unconfirmed(
-                    "Valkey transaction connection was invalidated".into(),
-                ));
-            }
+            let remaining = match retry.remaining() {
+                Ok(remaining) => remaining,
+                Err(error) => {
+                    if let Some(settlement) = outcome {
+                        drop(transaction);
+                        return Ok(settlement);
+                    }
+                    drop(transaction);
+                    return Err(error);
+                },
+            };
+            transaction.finish(remaining).await;
             if let Some(settlement) = outcome {
                 return Ok(settlement);
             }
@@ -785,6 +795,7 @@ mod tests {
                 BackendReserve, BackendSettlement, ReconcileRequest, ReserveRequest, TokenRateLimitStateBackend as _,
             },
             ValkeyConnection,
+            connection::VALKEY_TIMEOUT,
         },
         BucketRange, CounterWidth, DenialReason, ValkeySlidingWindowBackend, ValkeySlidingWindowConfig, counter_widths,
         retry_after_ms,
@@ -1235,7 +1246,7 @@ mod tests {
         let pipe = backend.settlement_pipeline(&id, &prefix, &reservation, &member, now, now, 40);
         let executed: Option<()> = pipe.query_async(transaction.inner()).await.unwrap();
         assert!(executed.is_none(), "a changed reservation aborts the whole settlement");
-        transaction.finish().await;
+        transaction.finish(VALKEY_TIMEOUT).await;
         assert_eq!(
             counter_value(&backend, &backend.usage_key("alice", 60_000, now)).await,
             10

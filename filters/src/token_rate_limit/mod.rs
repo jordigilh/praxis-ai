@@ -804,7 +804,6 @@ async fn reserve_hierarchy_level(
             if let BackendOnFailure::Open = on_failure
                 && let Some(outcome) = fail_open_outcome(&error)
             {
-                record_backend_error_metric(level.metric_rule, level.backend.backend_name(), &error);
                 record_hierarchy_fail_open(level, estimate, outcome, &error);
                 record_named_admission_span(
                     ctx,
@@ -2609,7 +2608,6 @@ impl TokenRateLimitFilter {
         error: &BackendError,
         on_failure: BackendOnFailure,
     ) -> FilterAction {
-        record_backend_error_metric(&rule.name, rule.backend.backend_name(), error);
         record_accounting_failure(rule, "reserve", error);
         if let BackendOnFailure::Open = on_failure
             && let Some(outcome) = fail_open_outcome(error)
@@ -2625,6 +2623,7 @@ impl TokenRateLimitFilter {
             );
             return FilterAction::Continue;
         }
+        record_backend_error_metric(&rule.name, rule.backend.backend_name(), error);
         record_admission_span(ctx, rule, estimate, "error");
         tracing::error!(
             error = backend_error_kind(error),
@@ -3406,8 +3405,8 @@ mod backend_injection_tests {
             BackendError, BackendReserve, BackendSettlement, BackendSnapshot, ReconcileRequest, ReserveRequest,
             TokenRateLimitStateBackend,
         },
-        backend_error_kind, record_backend_error_metric, record_request_metric, record_reserved_metric,
-        record_settlement_metrics, record_state_metrics, record_unauthenticated_metric,
+        backend_error_kind, record_backend_error_metric, record_fail_open_metric, record_request_metric,
+        record_reserved_metric, record_settlement_metrics, record_state_metrics, record_unauthenticated_metric,
     };
 
     #[test]
@@ -3589,6 +3588,7 @@ mod backend_injection_tests {
                 rule.backend.backend_name(),
                 &BackendError::Unavailable("test".to_owned()),
             );
+            record_fail_open_metric(&rule, "bypassed");
             record_unauthenticated_metric(&rule.name);
         });
 
@@ -3640,6 +3640,10 @@ mod backend_injection_tests {
         assert_eq!(
             labels_for("praxis_trl_backend_errors_total"),
             vec![vec!["backend".to_owned(), "error".to_owned(), "rule".to_owned()]]
+        );
+        assert_eq!(
+            labels_for("praxis_trl_fail_open_admissions_total"),
+            vec![vec!["backend".to_owned(), "outcome".to_owned(), "rule".to_owned()]]
         );
     }
 }

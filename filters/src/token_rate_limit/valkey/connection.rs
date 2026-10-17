@@ -20,7 +20,11 @@ use redis::{
     sentinel::{SentinelClient, SentinelClientBuilder, SentinelServerType},
 };
 
-use super::super::{backend::BackendError, config::BackendConfig, expand_backend_url, parse_backend_timeout};
+use super::super::{
+    backend::BackendError,
+    config::{BackendConfig, BackendTopology},
+    expand_backend_url,
+};
 
 /// Default bound on connecting and on every command's response. The configured
 /// operation timeout is also the overall deadline for transaction retries.
@@ -169,52 +173,45 @@ impl ValkeyConnection {
         backend: &BackendConfig,
         backend_name: &'static str,
     ) -> Result<Self, FilterError> {
-        if backend.url.is_some() && backend.sentinel.is_some() {
-            return Err("token_rate_limit: backend.url and backend.sentinel are mutually exclusive".into());
-        }
-        let url = backend.url.as_deref().map(expand_backend_url).transpose()?;
-        let discovery_timeout = backend
-            .sentinel
-            .as_ref()
-            .and_then(|sentinel| sentinel.discovery_timeout.as_deref());
         let timeouts = ValkeyTimeouts {
-            connect: parse_backend_timeout(backend.connect_timeout.as_deref(), "connect_timeout", VALKEY_TIMEOUT)?,
-            operation: parse_backend_timeout(
-                backend.operation_timeout.as_deref(),
-                "operation_timeout",
-                VALKEY_TIMEOUT,
-            )?,
-            discovery: parse_backend_timeout(discovery_timeout, "discovery_timeout", SENTINEL_TIMEOUT)?,
+            connect: backend.connect_timeout,
+            operation: backend.operation_timeout,
+            discovery: match backend.topology.as_ref() {
+                Some(BackendTopology::Sentinel(sentinel)) => sentinel.discovery_timeout,
+                _ => SENTINEL_TIMEOUT,
+            },
         };
-        let connection = match (&url, &backend.sentinel) {
-            (Some(url), None) => Self::standalone_with_timeouts_and_name(url.clone(), timeouts, backend_name)?,
-            (None, Some(sentinel)) => {
+        let connection = match backend.topology.as_ref() {
+            Some(BackendTopology::Standalone(url)) => {
+                Self::standalone_with_timeouts_and_name(expand_backend_url(url)?, timeouts, backend_name)?
+            },
+            Some(BackendTopology::Sentinel(sentinel)) => {
                 let endpoints = sentinel
                     .endpoints
                     .iter()
                     .map(|endpoint| expand_backend_url(endpoint))
                     .collect::<Result<Vec<_>, _>>()?;
                 let expand_credential = |value: &Option<String>| value.as_deref().map(expand_backend_url).transpose();
-                let connection = Self::sentinel(
+                Self::sentinel(
                     endpoints,
                     sentinel.service_name.clone(),
                     expand_credential(&sentinel.sentinel_username)?,
                     expand_credential(&sentinel.sentinel_password)?,
                     expand_credential(&sentinel.redis_username)?,
                     expand_credential(&sentinel.redis_password)?,
-                    sentinel.tls,
+                    sentinel.endpoints.first().is_some_and(|endpoint| {
+                        endpoint.starts_with("rediss://") || endpoint.starts_with("valkeys://")
+                    }),
                     timeouts,
                     backend_name,
-                )?;
-                connection
+                )?
             },
-            (None, None) => {
+            None => {
                 return Err(
                     "token_rate_limit: backend.url or backend.sentinel is required for backend.kind: redis/valkey"
                         .into(),
                 );
             },
-            (Some(_), Some(_)) => unreachable!("mutually exclusive backend topology was checked above"),
         };
         Ok(connection)
     }
@@ -735,22 +732,27 @@ impl TransactionConnection {
     }
 
     /// Return the connection to the pool for reuse, or drop both when
-    /// [`MAX_IDLE_TRANSACTION_CONNECTIONS`] are already idle.
-    pub(super) async fn finish(mut self) -> bool {
+    /// [`MAX_IDLE_TRANSACTION_CONNECTIONS`] are already idle. Cleanup is
+    /// bounded by the caller's remaining operation deadline; a completed
+    /// command result is not changed by pool invalidation or cleanup timeout.
+    pub(super) async fn finish(mut self, remaining: Duration) {
         let Some(connection) = self.connection.take() else {
             unreachable!("checked-out transaction connection is present");
         };
         let pool = Arc::clone(&self.pool);
         let generation = self.generation;
-        let mut idle = pool.idle.lock().await;
-        let pool_is_current = self.is_current();
-        if pool_is_current && idle.len() < MAX_IDLE_TRANSACTION_CONNECTIONS {
+        if let Ok(mut idle) = tokio::time::timeout(remaining, pool.idle.lock()).await
+            && self.is_current()
+            && idle.len() < MAX_IDLE_TRANSACTION_CONNECTIONS
+        {
             idle.push(PooledConnection { connection, generation });
+            drop(idle);
+            drop(self.permit.take());
+            drop(self);
+            return;
         }
-        drop(idle);
         drop(self.permit.take());
         drop(self);
-        pool_is_current
     }
 }
 
@@ -941,18 +943,22 @@ mod tests {
         if std::env::var("TOKEN_RATE_LIMIT_SENTINEL_REPLICATION_HEALTH_TEST").as_deref() == Ok("1") {
             return;
         }
-        let bootstrap = super::super::ensure_accounting_config(
+        let bootstrap = Box::pin(super::super::ensure_accounting_config(
             &connection,
             "praxis:test:sentinel:live",
             "praxis:test:sentinel:live:accounting-config",
             "v3:live-sentinel-test",
             "praxis:test:sentinel:live:keys",
-        )
+        ))
         .await;
         assert!(bootstrap.is_ok(), "shared-backend bootstrap failed: {bootstrap:?}");
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "live Sentinel test covers ambiguous mutation recovery"
+    )]
     async fn live_sentinel_ambiguous_mutation_is_not_replayed() {
         let Ok(endpoint_env) = std::env::var("TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS") else {
             return;
@@ -994,7 +1000,7 @@ mod tests {
         // intentionally unconfirmed and must never be replayed.
         let mut mutation = redis::pipe();
         mutation.cmd("INCR").arg(&key);
-        mutation.cmd("DEBUG").arg("SLEEP").arg(1);
+        mutation.cmd("DEBUG").arg("SLEEP").arg(0.2);
         let result: Result<Vec<redis::Value>, BackendError> = connection.pipeline(&mutation).await;
         assert!(
             matches!(result, Err(BackendError::Unconfirmed(_))),
@@ -1052,7 +1058,7 @@ mod tests {
         };
         let connection = ValkeyConnection::new(url).unwrap();
         let first = connection.transaction().await.unwrap();
-        first.finish().await;
+        first.finish(VALKEY_TIMEOUT).await;
         let second = connection.transaction().await.unwrap();
         assert_eq!(
             connection.transactions.idle.lock().await.len(),
@@ -1083,7 +1089,7 @@ mod tests {
         let waiter = tokio::spawn(async move { waiting.transaction().await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(!waiter.is_finished(), "the sole checkout slot is still held");
-        first.finish().await;
+        first.finish(VALKEY_TIMEOUT).await;
         let second = tokio::time::timeout(VALKEY_TIMEOUT, waiter)
             .await
             .unwrap()
@@ -1111,7 +1117,7 @@ mod tests {
             checked_out.push(connection.transaction().await.unwrap());
         }
         for transaction in checked_out {
-            transaction.finish().await;
+            transaction.finish(VALKEY_TIMEOUT).await;
         }
         assert_eq!(
             connection.transactions.idle.lock().await.len(),

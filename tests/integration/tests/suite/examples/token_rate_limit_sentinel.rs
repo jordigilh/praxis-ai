@@ -98,7 +98,9 @@ fn sentinel_cli(args: &[&str]) -> std::process::Output {
         env::var("TOKEN_RATE_LIMIT_SENTINEL_SENTINEL_CONTAINER").expect("fixture must export its Sentinel container");
     let product = env::var("TOKEN_RATE_LIMIT_SENTINEL_PRODUCT").unwrap_or_else(|_| "valkey".to_owned());
     let cli = if product == "redis" { "redis-cli" } else { "valkey-cli" };
-    let password = env::var("TOKEN_RATE_LIMIT_SENTINEL_PASSWORD").ok();
+    let password = env::var("TOKEN_RATE_LIMIT_SENTINEL_PASSWORD")
+        .ok()
+        .filter(|value| !value.is_empty());
 
     let mut command = Command::new(engine);
     if let Some(password) = password {

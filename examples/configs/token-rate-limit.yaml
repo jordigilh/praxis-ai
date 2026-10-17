@@ -43,7 +43,7 @@
 #       redis_password: "${REDIS_PASSWORD}"
 #       sentinel_password: "${SENTINEL_PASSWORD}"
 #       discovery_timeout: 3s
-#       tls: false
+#       # Use rediss:// or valkeys:// endpoints when Sentinel TLS is required.
 #
 # Healthy requests reuse the cached writable-primary connection. Discovery is
 # bounded during replacement; ambiguous mutations are never replayed. Async

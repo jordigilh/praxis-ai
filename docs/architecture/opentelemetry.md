@@ -101,6 +101,14 @@ miss, or backend error before the rule reservation uses the same span with
   when the response body ends. Absent when the decision was not `admitted`
   or no usage metadata was produced.
 
+The token-rate-limit Prometheus metrics include
+`praxis_trl_fail_open_admissions_total{rule,backend,outcome}` for explicit
+`backend.on_failure: open` admissions. `outcome` is `bypassed` when no backend
+mutation was dispatched and `unconfirmed` when a dispatched operation may have
+committed. Fail-open admissions are not included in
+`praxis_trl_backend_errors_total`, which is reserved for failed reservations
+that fail closed with 503, plus reconciliation failures.
+
 The span is created at admission and dropped when the response body ends,
 so its lifetime covers the streamed response. It does not contain the
 authenticated subject, internal budget key, prompt, body, model, or other

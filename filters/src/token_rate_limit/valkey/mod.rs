@@ -263,6 +263,10 @@ const BOOTSTRAP_SCAN_COUNT: usize = 256;
     clippy::allow_attributes,
     reason = "this stack-frame allowance must work across supported Clippy versions"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "accounting bootstrap contains one bounded transaction retry loop"
+)]
 #[allow(
     clippy::large_stack_frames,
     reason = "bounded accounting state machine has intentionally large await state"
@@ -286,18 +290,24 @@ pub(super) async fn ensure_accounting_config(
             .map_err(|_elapsed| BackendError::Unavailable("Valkey operation deadline exceeded".into()))??;
         if !transaction.is_current() {
             drop(transaction);
-            return Err(BackendError::Unconfirmed(
-                "Valkey transaction connection was invalidated".into(),
-            ));
+            retry.pause().await?;
+            continue;
         }
         let outcome = ensure_accounting_config_attempt(transaction.inner(), marker, expected, state_index).await;
         match outcome {
             Ok(outcome) => {
-                if !transaction.finish().await {
-                    return Err(BackendError::Unconfirmed(
-                        "Valkey transaction connection was invalidated".into(),
-                    ));
-                }
+                let remaining = match retry.remaining() {
+                    Ok(remaining) => remaining,
+                    Err(error) => {
+                        if outcome.is_some() {
+                            drop(transaction);
+                            return Ok(());
+                        }
+                        drop(transaction);
+                        return Err(error);
+                    },
+                };
+                transaction.finish(remaining).await;
                 if let Some(()) = outcome {
                     return Ok(());
                 }

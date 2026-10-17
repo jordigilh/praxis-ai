@@ -3,7 +3,7 @@
 
 //! Deserialized YAML configuration for the `token_rate_limit` filter.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use serde::Deserialize;
 
@@ -1024,23 +1024,19 @@ impl RuleAlgorithm {
 pub(super) const DEFAULT_RESERVATION_TIMEOUT: &str = "30s";
 
 /// Backend selection and connection details.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Deserialize)]
+#[serde(try_from = "RawBackendConfig")]
 pub(super) struct BackendConfig {
     /// Which backend implementation to use.
     #[serde(default)]
     pub kind: BackendKind,
 
-    /// Backend connection URL. Supports one `${ENV_VAR}` reference, so
-    /// credentials/hostnames don't need to be committed to config.
-    /// Required for a network backend when `sentinel` is absent; ignored for
-    /// `kind: memory`.
+    /// Standalone URL or Sentinel topology. The two input forms are mutually
+    /// exclusive and network backends require one; ignored for `kind: memory`.
+    /// TLS is derived from the endpoint scheme, so `rediss://`/`valkeys://`
+    /// enable Sentinel TLS without a second boolean that can disagree.
     #[serde(default)]
-    pub url: Option<String>,
-
-    /// Sentinel topology. Mutually exclusive with `url`.
-    #[serde(default)]
-    pub sentinel: Option<SentinelConfig>,
+    pub topology: Option<BackendTopology>,
 
     /// Key namespace prefix, so multiple filter rules or deployments can
     /// share one Redis/Valkey instance without colliding. The namespace is
@@ -1088,12 +1084,136 @@ pub(super) struct BackendConfig {
     /// Maximum time to establish a standalone or discovered-primary data
     /// connection. Defaults to 500ms.
     #[serde(default)]
-    pub connect_timeout: Option<String>,
+    pub connect_timeout: Duration,
 
     /// Maximum time to wait for one datastore response or transaction-pool
     /// permit. Defaults to 500ms.
     #[serde(default)]
-    pub operation_timeout: Option<String>,
+    pub operation_timeout: Duration,
+}
+
+impl Default for BackendConfig {
+    fn default() -> Self {
+        Self {
+            kind: BackendKind::default(),
+            topology: None,
+            namespace: None,
+            on_failure: BackendOnFailure::default(),
+            connect_timeout: Duration::from_millis(500),
+            operation_timeout: Duration::from_millis(500),
+        }
+    }
+}
+
+/// Mutually exclusive backend connection topologies.
+#[derive(Debug)]
+pub(super) enum BackendTopology {
+    /// One standalone Redis/Valkey endpoint.
+    Standalone(String),
+    /// A Sentinel-monitored writable primary.
+    Sentinel(Box<SentinelConfig>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Raw flat backend fields converted into [`BackendConfig`].
+struct RawBackendConfig {
+    /// Backend implementation selector.
+    #[serde(default)]
+    kind: BackendKind,
+    /// Standalone endpoint, if configured.
+    #[serde(default)]
+    url: Option<String>,
+    /// Sentinel topology, if configured.
+    #[serde(default)]
+    sentinel: Option<RawSentinelConfig>,
+    /// Shared key namespace.
+    #[serde(default)]
+    namespace: Option<String>,
+    /// Backend failure policy.
+    #[serde(default)]
+    on_failure: BackendOnFailure,
+    /// Connection timeout text.
+    #[serde(default)]
+    connect_timeout: Option<String>,
+    /// Operation timeout text.
+    #[serde(default)]
+    operation_timeout: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Raw Sentinel fields converted into [`SentinelConfig`].
+struct RawSentinelConfig {
+    /// Ordered Sentinel endpoints.
+    endpoints: Vec<String>,
+    /// Monitored primary service name.
+    service_name: String,
+    /// Optional Sentinel ACL username.
+    #[serde(default)]
+    sentinel_username: Option<String>,
+    /// Optional Sentinel ACL password.
+    #[serde(default)]
+    sentinel_password: Option<String>,
+    /// Optional data-node ACL username.
+    #[serde(default)]
+    redis_username: Option<String>,
+    /// Optional data-node ACL password.
+    #[serde(default)]
+    redis_password: Option<String>,
+    /// Optional discovery timeout text.
+    #[serde(default)]
+    discovery_timeout: Option<String>,
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "parse-time conversion validates the complete backend topology"
+)]
+impl TryFrom<RawBackendConfig> for BackendConfig {
+    type Error = String;
+
+    fn try_from(raw: RawBackendConfig) -> Result<Self, Self::Error> {
+        let topology = match (raw.url, raw.sentinel) {
+            (Some(url), None) => Some(BackendTopology::Standalone(url)),
+            (None, Some(sentinel)) => Some(BackendTopology::Sentinel(Box::new(SentinelConfig {
+                endpoints: sentinel.endpoints,
+                service_name: sentinel.service_name,
+                sentinel_username: sentinel.sentinel_username,
+                sentinel_password: sentinel.sentinel_password,
+                redis_username: sentinel.redis_username,
+                redis_password: sentinel.redis_password,
+                discovery_timeout: super::parse_backend_timeout(
+                    sentinel.discovery_timeout.as_deref(),
+                    "discovery_timeout",
+                    Duration::from_secs(5),
+                )
+                .map_err(|error| error.to_string())?,
+            }))),
+            (Some(_), Some(_)) => {
+                return Err("token_rate_limit: backend.url and backend.sentinel are mutually exclusive".into());
+            },
+            (None, None) => None,
+        };
+        Ok(Self {
+            kind: raw.kind,
+            topology,
+            namespace: raw.namespace,
+            on_failure: raw.on_failure,
+            connect_timeout: super::parse_backend_timeout(
+                raw.connect_timeout.as_deref(),
+                "connect_timeout",
+                Duration::from_millis(500),
+            )
+            .map_err(|error| error.to_string())?,
+            operation_timeout: super::parse_backend_timeout(
+                raw.operation_timeout.as_deref(),
+                "operation_timeout",
+                Duration::from_millis(500),
+            )
+            .map_err(|error| error.to_string())?,
+        })
+    }
 }
 
 /// Validated inputs for native redis-rs Sentinel discovery.
@@ -1117,12 +1237,8 @@ pub(super) struct SentinelConfig {
     /// Optional data-node ACL password, preferably supplied via `${ENV_VAR}`.
     #[serde(default)]
     pub redis_password: Option<String>,
-    /// Use TLS for both Sentinel and discovered data-node connections.
-    #[serde(default)]
-    pub tls: bool,
     /// Overall Sentinel discovery and convergence bound.
-    #[serde(default)]
-    pub discovery_timeout: Option<String>,
+    pub discovery_timeout: Duration,
 }
 
 /// Behavior when a shared-backend reservation cannot be confirmed.

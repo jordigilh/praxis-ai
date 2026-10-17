@@ -104,7 +104,12 @@ fn unavailable_backend_token_rate_limit_config(
     let backend = format!(
         "        backend:\n          kind: valkey\n          url: redis://127.0.0.1:1\n          on_failure: {on_failure}\n          operation_timeout: 20ms\n"
     );
-    let yaml = yaml.replacen("        key: global\n", &format!("        key: global\n{backend}"), 1);
+    let anchor = "        key: global\n";
+    assert!(
+        yaml.contains(anchor),
+        "token-rate-limit.yaml must contain the backend insertion anchor"
+    );
+    let yaml = yaml.replacen(anchor, &format!("{anchor}{backend}"), 1);
     let patched = patch_yaml(&yaml, proxy_port, &HashMap::from([("127.0.0.1:3000", backend_port)]));
     praxis_core::config::Config::from_yaml(&patched).expect("config should parse")
 }

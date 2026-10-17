@@ -399,6 +399,14 @@ impl ValkeyTokenBucketBackend {
         clippy::significant_drop_tightening,
         reason = "transaction.finish() consumes the connection; the lint misidentifies the borrow across .await as a retained drop"
     )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "reservation owns the bounded transaction retry and outcome flow"
+    )]
+    #[expect(
+        clippy::large_stack_frames,
+        reason = "reservation state includes the bounded WATCH/MULTI/EXEC retry"
+    )]
     async fn reserve_with<H, F>(&self, request: ReserveRequest, mut between: H) -> Result<BackendReserve, BackendError>
     where
         H: FnMut(u32) -> F + Send,
@@ -414,9 +422,8 @@ impl ValkeyTokenBucketBackend {
                 .map_err(|_elapsed| BackendError::Unavailable("Valkey operation deadline exceeded".into()))??;
             if !transaction.is_current() {
                 drop(transaction);
-                return Err(BackendError::Unconfirmed(
-                    "Valkey transaction connection was invalidated".into(),
-                ));
+                retry.pause().await?;
+                continue;
             }
             let outcome = match tokio::time::timeout(
                 retry.remaining()?,
@@ -430,11 +437,18 @@ impl ValkeyTokenBucketBackend {
                     return Err(BackendError::Unconfirmed("Valkey operation deadline exceeded".into()));
                 },
             };
-            if !transaction.finish().await {
-                return Err(BackendError::Unconfirmed(
-                    "Valkey transaction connection was invalidated".into(),
-                ));
-            }
+            let remaining = match retry.remaining() {
+                Ok(remaining) => remaining,
+                Err(error) => {
+                    if let Some(outcome) = outcome {
+                        drop(transaction);
+                        return Ok(outcome);
+                    }
+                    drop(transaction);
+                    return Err(error);
+                },
+            };
+            transaction.finish(remaining).await;
             if let Some(outcome) = outcome {
                 return Ok(outcome);
             }
@@ -619,8 +633,11 @@ impl ValkeyTokenBucketBackend {
         &self,
         connection: &mut MultiplexedConnection,
         request: &ReconcileRequest,
+        retry: &AbortRetry,
     ) -> Result<Option<BackendSettlement>, BackendError> {
-        let (value, bucket) = self.read_reservation(connection, request).await?;
+        let (value, bucket) = tokio::time::timeout(retry.remaining()?, self.read_reservation(connection, request))
+            .await
+            .map_err(|_elapsed| BackendError::Unavailable("Valkey operation deadline exceeded".into()))??;
         let Some(value) = value else {
             unwatch(connection).await?;
             return Ok(Some(BackendSettlement::Noop));
@@ -630,9 +647,9 @@ impl ValkeyTokenBucketBackend {
         let (refund, overage) = (estimate.saturating_sub(actual), actual.saturating_sub(estimate));
         let tokens = self.settled(self.refill(&bucket)?, refund, overage);
         let pipe = self.settlement_pipeline(&bucket, request.reservation_id, tokens);
-        let executed: Option<()> = pipe
-            .query_async(connection)
+        let executed: Option<()> = tokio::time::timeout(retry.remaining()?, pipe.query_async(connection))
             .await
+            .map_err(|_elapsed| BackendError::Unconfirmed("Valkey operation deadline exceeded".into()))?
             .map_err(|error| command_error(&error))?;
         Ok(executed.map(|()| BackendSettlement::Applied {
             actual,
@@ -701,10 +718,6 @@ impl TokenRateLimitStateBackend for ValkeyTokenBucketBackend {
         reason = "transaction.finish() consumes the connection; the lint misidentifies the borrow across .await as a retained drop"
     )]
     #[expect(
-        clippy::allow_attributes,
-        reason = "this stack-frame allowance must work across supported Clippy versions"
-    )]
-    #[allow(
         clippy::large_stack_frames,
         reason = "WATCH/MULTI/EXEC settlement owns a bounded transaction state machine"
     )]
@@ -717,27 +730,22 @@ impl TokenRateLimitStateBackend for ValkeyTokenBucketBackend {
                 .map_err(|_elapsed| BackendError::Unavailable("Valkey operation deadline exceeded".into()))??;
             if !transaction.is_current() {
                 drop(transaction);
-                return Err(BackendError::Unconfirmed(
-                    "Valkey transaction connection was invalidated".into(),
-                ));
+                retry.pause().await?;
+                continue;
             }
-            let outcome = match tokio::time::timeout(
-                retry.remaining()?,
-                self.reconcile_attempt(transaction.inner(), &request),
-            )
-            .await
-            {
-                Ok(outcome) => outcome?,
-                Err(_elapsed) => {
+            let outcome = self.reconcile_attempt(transaction.inner(), &request, &retry).await?;
+            let remaining = match retry.remaining() {
+                Ok(remaining) => remaining,
+                Err(error) => {
+                    if let Some(settlement) = outcome {
+                        drop(transaction);
+                        return Ok(settlement);
+                    }
                     drop(transaction);
-                    return Err(BackendError::Unconfirmed("Valkey operation deadline exceeded".into()));
+                    return Err(error);
                 },
             };
-            if !transaction.finish().await {
-                return Err(BackendError::Unconfirmed(
-                    "Valkey transaction connection was invalidated".into(),
-                ));
-            }
+            transaction.finish(remaining).await;
             if let Some(settlement) = outcome {
                 return Ok(settlement);
             }
