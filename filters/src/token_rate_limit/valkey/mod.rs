@@ -265,7 +265,7 @@ const BOOTSTRAP_SCAN_COUNT: usize = 256;
 )]
 #[expect(
     clippy::too_many_lines,
-    reason = "accounting bootstrap contains one bounded transaction retry loop"
+    reason = "accounting bootstrap is one bounded backend state machine"
 )]
 #[allow(
     clippy::large_stack_frames,

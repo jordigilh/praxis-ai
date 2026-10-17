@@ -19,9 +19,9 @@ filter_chains:
           kind: valkey # use `redis` for the Redis qualification lane
           sentinel:
             endpoints:
-              - "redis://127.0.0.1:26379"
-              - "redis://127.0.0.1:26380"
-              - "redis://127.0.0.1:26381"
+              - "redis://127.0.0.1:36379"
+              - "redis://127.0.0.1:36380"
+              - "redis://127.0.0.1:36381"
             service_name: mymaster
             # redis_password: "${TOKEN_RATE_LIMIT_REDIS_PASSWORD}"
             # sentinel_password: "${TOKEN_RATE_LIMIT_SENTINEL_PASSWORD}"

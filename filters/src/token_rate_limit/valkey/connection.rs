@@ -911,6 +911,10 @@ mod tests {
         clippy::too_many_lines,
         reason = "live fixture test covers discovery, bootstrap, and command admission"
     )]
+    #[expect(
+        clippy::large_futures,
+        reason = "live fixture intentionally exercises the full accounting bootstrap"
+    )]
     async fn live_sentinel_pipeline_uses_the_discovered_primary() {
         let Ok(endpoint_env) = std::env::var("TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS") else {
             return;
@@ -957,7 +961,7 @@ mod tests {
     #[tokio::test]
     #[expect(
         clippy::too_many_lines,
-        reason = "live Sentinel test covers ambiguous mutation recovery"
+        reason = "live fixture covers an ambiguous mutation through recovery"
     )]
     async fn live_sentinel_ambiguous_mutation_is_not_replayed() {
         let Ok(endpoint_env) = std::env::var("TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS") else {

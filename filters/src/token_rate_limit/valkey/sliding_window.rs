@@ -660,6 +660,14 @@ fn next_i64(values: &mut impl Iterator<Item = redis::Value>) -> Result<i64, Back
     redis::from_redis_value::<i64>(value).map_err(|_error| BackendError::InvalidResponse)
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "reserve implementation intentionally keeps its backend sequence together"
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "reserve keeps the read/decision/admission sequence together"
+)]
 #[async_trait]
 impl TokenRateLimitStateBackend for ValkeySlidingWindowBackend {
     async fn reserve(&self, request: ReserveRequest) -> Result<BackendReserve, BackendError> {

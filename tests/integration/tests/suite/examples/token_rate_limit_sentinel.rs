@@ -84,7 +84,7 @@ fn fixture_config_with_rule(
         .map(|endpoint| format!("              - \"{endpoint}\""))
         .collect::<Vec<_>>()
         .join("\n");
-    let old_endpoints = "            endpoints:\n              - \"redis://127.0.0.1:26379\"\n              - \"redis://127.0.0.1:26380\"\n              - \"redis://127.0.0.1:26381\"";
+    let old_endpoints = "            endpoints:\n              - \"redis://127.0.0.1:36379\"\n              - \"redis://127.0.0.1:36380\"\n              - \"redis://127.0.0.1:36381\"";
     yaml = yaml.replace(old_endpoints, &format!("            endpoints:\n{endpoint_lines}"));
     let patched = patch_yaml(&yaml, proxy_port, &HashMap::from([("127.0.0.1:9000", backend_port)]));
     praxis_core::config::Config::from_yaml(&patched).expect("Sentinel fixture config should parse")

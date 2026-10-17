@@ -400,12 +400,13 @@ impl ValkeyTokenBucketBackend {
         reason = "transaction.finish() consumes the connection; the lint misidentifies the borrow across .await as a retained drop"
     )]
     #[expect(
-        clippy::too_many_lines,
-        reason = "reservation owns the bounded transaction retry and outcome flow"
+        clippy::allow_attributes,
+        reason = "reserve retry state needs bounded backend lint allowances"
     )]
-    #[expect(
+    #[allow(
+        clippy::too_many_lines,
         clippy::large_stack_frames,
-        reason = "reservation state includes the bounded WATCH/MULTI/EXEC retry"
+        reason = "reserve retry loop keeps transaction lifetime and deadline handling together"
     )]
     async fn reserve_with<H, F>(&self, request: ReserveRequest, mut between: H) -> Result<BackendReserve, BackendError>
     where
@@ -707,10 +708,18 @@ impl ValkeyTokenBucketBackend {
     }
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "reserve implementation intentionally keeps its backend sequence together"
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "reserve keeps the transaction and settlement sequence together"
+)]
 #[async_trait]
 impl TokenRateLimitStateBackend for ValkeyTokenBucketBackend {
     async fn reserve(&self, request: ReserveRequest) -> Result<BackendReserve, BackendError> {
-        self.reserve_with(request, |_attempt| std::future::ready(())).await
+        Box::pin(self.reserve_with(request, |_attempt| std::future::ready(()))).await
     }
 
     #[expect(
