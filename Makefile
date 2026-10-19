@@ -274,7 +274,7 @@ test-token-rate-limit-sentinel-integration:
 		sh -c 'cargo test -p praxis-ai-filters --features token-rate-limit-filter \
 			live_sentinel_ --lib -- --test-threads=1 $(if $(V),--nocapture) && \
 			cargo test -p praxis-tests-integration --features token-rate-limit-filter --test suite \
-			$(SENTINEL_TEST_FILTER) -- --test-threads=1 $(if $(V),--nocapture)'
+			$(SENTINEL_TEST_FILTER) -- --ignored --test-threads=1 $(if $(V),--nocapture)'
 
 test-token-rate-limit-valkey-unit:
 	cargo test -p praxis-ai-filters --features token-rate-limit-filter valkey $(_NOCAPTURE)
