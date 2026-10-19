@@ -160,6 +160,7 @@ fn failover_warm_proxy_connection() {
 }
 
 #[test]
+#[ignore = "requires the Sentinel fixture topology"]
 fn sentinel_fixture_admits_through_the_real_proxy_pipeline() {
     if env::var("TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS").is_err() {
         eprintln!("skipping: TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS not set");
@@ -179,6 +180,7 @@ fn sentinel_fixture_admits_through_the_real_proxy_pipeline() {
 }
 
 #[test]
+#[ignore = "requires the Sentinel fixture topology"]
 fn sentinel_fixture_enforces_sliding_window_quota_through_the_real_pipeline() {
     if env::var("TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS").is_err() {
         eprintln!("skipping: TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS not set");
@@ -212,6 +214,7 @@ fn sentinel_fixture_enforces_sliding_window_quota_through_the_real_pipeline() {
 }
 
 #[test]
+#[ignore = "requires the Sentinel fixture topology"]
 fn sentinel_fixture_enforces_token_bucket_quota_through_the_real_pipeline() {
     if env::var("TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS").is_err() {
         eprintln!("skipping: TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS not set");
@@ -246,6 +249,7 @@ fn sentinel_fixture_enforces_token_bucket_quota_through_the_real_pipeline() {
 }
 
 #[test]
+#[ignore = "requires the Sentinel fixture topology"]
 fn sentinel_fixture_warm_connection_reconnects_after_planned_failover() {
     if env::var("TOKEN_RATE_LIMIT_SENTINEL_FAILOVER_BEFORE_COMMAND").as_deref() != Ok("1") {
         eprintln!("skipping: planned failover lane is not enabled");
@@ -277,6 +281,7 @@ fn sentinel_fixture_warm_connection_reconnects_after_planned_failover() {
 }
 
 #[test]
+#[ignore = "requires the Sentinel fixture topology"]
 fn sentinel_health_noreplicas_failure() {
     if env::var("TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS").is_err() {
         eprintln!("skipping: TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS not set");
