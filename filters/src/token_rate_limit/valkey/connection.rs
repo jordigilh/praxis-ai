@@ -911,10 +911,6 @@ mod tests {
         clippy::too_many_lines,
         reason = "live fixture test covers discovery, bootstrap, and command admission"
     )]
-    #[expect(
-        clippy::large_futures,
-        reason = "live fixture intentionally exercises the full accounting bootstrap"
-    )]
     async fn live_sentinel_pipeline_uses_the_discovered_primary() {
         let Ok(endpoint_env) = std::env::var("TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS") else {
             return;
