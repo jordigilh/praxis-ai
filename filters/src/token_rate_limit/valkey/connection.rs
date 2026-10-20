@@ -423,7 +423,7 @@ impl ValkeyConnection {
         .await
         .map_err(|_elapsed| BackendError::Unavailable("transaction pool exhausted: timeout".into()))?
         .map_err(|_closed| BackendError::Unavailable("transaction pool closed".into()))?;
-        let (connection, generation) = loop {
+        let (connection, generation, shared_generation_at_checkout) = loop {
             let mut idle = self.transactions.idle.lock().await;
             // Read the generation while holding the same lock that invalidation
             // uses to clear idle connections. This prevents a checkout from
@@ -435,9 +435,19 @@ impl ValkeyConnection {
                 Some(PooledConnection {
                     connection,
                     generation: pooled_generation,
-                }) if pooled_generation == generation => break (connection, generation),
+                }) if pooled_generation == generation => {
+                    break (connection, generation, self.generation.load(Ordering::Acquire));
+                },
                 Some(PooledConnection { .. }) => {},
-                None => break (self.open().await?, generation),
+                None => {
+                    let opening_shared_generation = self.generation.load(Ordering::Acquire);
+                    let connection = self.open().await?;
+                    if self.generation.load(Ordering::Acquire) != opening_shared_generation {
+                        drop(connection);
+                        continue;
+                    }
+                    break (connection, generation, opening_shared_generation);
+                },
             }
         };
         Ok(TransactionConnection {
@@ -446,7 +456,7 @@ impl ValkeyConnection {
             permit: Some(permit),
             generation,
             shared_generation: Arc::clone(&self.generation),
-            shared_generation_at_checkout: self.generation.load(Ordering::Acquire),
+            shared_generation_at_checkout,
         })
     }
 
