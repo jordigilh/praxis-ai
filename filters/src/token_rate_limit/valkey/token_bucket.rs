@@ -726,10 +726,6 @@ impl TokenRateLimitStateBackend for ValkeyTokenBucketBackend {
         clippy::significant_drop_tightening,
         reason = "transaction.finish() consumes the connection; the lint misidentifies the borrow across .await as a retained drop"
     )]
-    #[expect(
-        clippy::large_stack_frames,
-        reason = "WATCH/MULTI/EXEC settlement owns a bounded transaction state machine"
-    )]
     async fn reconcile(&self, request: ReconcileRequest) -> Result<BackendSettlement, BackendError> {
         Box::pin(self.ensure_accounting_config()).await?;
         let mut retry = AbortRetry::start(self.valkey.operation_deadline());

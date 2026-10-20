@@ -467,6 +467,10 @@ impl ValkeyConnection {
 
     /// Return the cached shared connection, opening (and caching) a fresh
     /// one on first use or after a prior failure cleared it.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "bounded open, generation validation, and cache publication stay together"
+    )]
     async fn shared(&self) -> Result<(MultiplexedConnection, u64), BackendError> {
         let lock_timeout = match self.source.as_ref() {
             ConnectionSource::Standalone(_) => self.timeouts.connect,
@@ -543,10 +547,6 @@ impl ValkeyConnection {
         clippy::large_stack_frames,
         reason = "bounded connection/discovery state machine owns its timeout state"
     )]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "deadline-aware standalone and Sentinel setup share one lifecycle"
-    )]
     async fn open_until(&self, deadline: Instant) -> Result<MultiplexedConnection, BackendError> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -572,6 +572,14 @@ impl ValkeyConnection {
     /// Open a transaction connection through the cached or newly discovered
     /// Sentinel primary, holding the cache lock across discovery so concurrent
     /// checkouts coalesce onto one primary lookup per generation.
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "hold the primary cache lock to coalesce bounded discovery"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "bounded discovery and primary retry state stay in one lifecycle"
+    )]
     async fn open_sentinel_until(
         &self,
         sentinel: &tokio::sync::Mutex<SentinelClient>,
@@ -584,8 +592,7 @@ impl ValkeyConnection {
             .map_err(|_elapsed| BackendError::Unavailable("Sentinel primary cache lock timeout".into()))?;
         loop {
             let generation = self.generation.load(Ordering::Acquire);
-            if primary.as_ref().is_some_and(|cached| cached.generation == generation) {
-                let cached = primary.as_ref().expect("checked above");
+            if let Some(cached) = primary.as_ref().filter(|cached| cached.generation == generation) {
                 match self
                     .open_primary_until(&cached.client, deadline, connection_config)
                     .await
@@ -630,7 +637,14 @@ impl ValkeyConnection {
                 client,
                 generation: discovery_generation,
             });
-            let client = &primary.as_ref().expect("primary was just cached").client;
+            let client = match primary.as_ref() {
+                Some(cached) => &cached.client,
+                None => {
+                    return Err(BackendError::Unavailable(
+                        "Sentinel primary cache publication failed".into(),
+                    ));
+                },
+            };
             match self.open_primary_until(client, deadline, connection_config).await {
                 Ok(connection) if self.generation.load(Ordering::Acquire) == discovery_generation => {
                     return Ok(connection);
@@ -685,6 +699,10 @@ impl ValkeyConnection {
         clippy::too_many_lines,
         reason = "bounded TLS discovery owns endpoint traversal, role verification, and retry timing"
     )]
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "hold the primary cache lock to coalesce bounded TLS discovery"
+    )]
     async fn open_tls_sentinel(
         &self,
         sentinel: &TlsSentinelConfig,
@@ -697,8 +715,7 @@ impl ValkeyConnection {
             .map_err(|_elapsed| BackendError::Unavailable("Sentinel primary cache lock timeout".into()))?;
         loop {
             let generation = self.generation.load(Ordering::Acquire);
-            if primary.as_ref().is_some_and(|cached| cached.generation == generation) {
-                let cached = primary.as_ref().expect("checked above");
+            if let Some(cached) = primary.as_ref().filter(|cached| cached.generation == generation) {
                 match self
                     .open_primary_until(&cached.client, deadline, connection_config)
                     .await
