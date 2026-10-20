@@ -75,6 +75,16 @@ impl Default for ValkeyTimeouts {
     }
 }
 
+/// Bound one plain Sentinel endpoint attempt without exceeding the enclosing
+/// discovery deadline or the configured connect/operation limits.
+fn sentinel_endpoint_timeout(timeouts: ValkeyTimeouts, remaining: Duration) -> Duration {
+    timeouts
+        .connect
+        .min(timeouts.operation)
+        .min(SENTINEL_ENDPOINT_TIMEOUT)
+        .min(remaining)
+}
+
 /// Most idle transaction connections kept for reuse; [`TransactionConnection::finish`]
 /// drops any beyond this. The pool is kept small on purpose: a pooled
 /// connection that died (a Valkey restart, an idle timeout) is only found
@@ -759,18 +769,13 @@ impl ValkeyConnection {
         sentinel: &PlainSentinelConfig,
         deadline: Instant,
     ) -> Result<redis::Client, BackendError> {
-        let endpoint_timeout = self
-            .timeouts
-            .connect
-            .min(self.timeouts.operation)
-            .min(SENTINEL_ENDPOINT_TIMEOUT);
         let mut last_error = None;
         for endpoint in &sentinel.endpoints {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 break;
             }
-            let timeout = endpoint_timeout.min(remaining);
+            let timeout = sentinel_endpoint_timeout(self.timeouts, remaining);
             let mut builder = SentinelClientBuilder::new(
                 std::iter::once(endpoint.clone()),
                 sentinel.service_name.as_str(),
@@ -1411,6 +1416,64 @@ mod tests {
             connection.source.as_ref(),
             super::ConnectionSource::SentinelTls { .. }
         ));
+    }
+
+    #[test]
+    fn expanded_mixed_sentinel_schemes_fail_closed() {
+        let backend = BackendConfig {
+            kind: BackendKind::Valkey,
+            topology: Some(BackendTopology::Sentinel(Box::new(SentinelConfig {
+                endpoints: vec!["${SENTINEL_TLS_ENDPOINT}".into(), "${SENTINEL_PLAIN_ENDPOINT}".into()],
+                service_name: "mymaster".into(),
+                sentinel_username: None,
+                sentinel_password: None,
+                redis_username: None,
+                redis_password: None,
+                discovery_timeout: Duration::from_secs(2),
+            }))),
+            namespace: None,
+            on_failure: BackendOnFailure::Closed,
+            connect_timeout: VALKEY_TIMEOUT,
+            operation_timeout: VALKEY_TIMEOUT,
+        };
+        let result = ValkeyConnection::from_backend_config_with(&backend, "valkey", |name| match name {
+            "SENTINEL_TLS_ENDPOINT" => Ok("rediss://127.0.0.1:26379".into()),
+            "SENTINEL_PLAIN_ENDPOINT" => Ok("redis://127.0.0.1:26380".into()),
+            _ => panic!("unexpected environment variable: {name}"),
+        });
+        let error = match result {
+            Ok(_) => panic!("mixed expanded Sentinel schemes must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("scheme must use TLS"), "got: {error}");
+    }
+
+    #[test]
+    fn plain_sentinel_endpoint_timeout_is_independently_bounded() {
+        let timeouts = ValkeyTimeouts {
+            connect: Duration::from_secs(5),
+            operation: Duration::from_secs(5),
+            discovery: Duration::from_secs(5),
+        };
+        assert_eq!(
+            super::sentinel_endpoint_timeout(timeouts, Duration::from_secs(10)),
+            VALKEY_TIMEOUT
+        );
+        assert_eq!(
+            super::sentinel_endpoint_timeout(
+                ValkeyTimeouts {
+                    connect: Duration::from_millis(20),
+                    operation: Duration::from_secs(5),
+                    discovery: Duration::from_secs(5),
+                },
+                Duration::from_secs(10),
+            ),
+            Duration::from_millis(20)
+        );
+        assert_eq!(
+            super::sentinel_endpoint_timeout(timeouts, Duration::from_millis(30)),
+            Duration::from_millis(30)
+        );
     }
 
     #[tokio::test]

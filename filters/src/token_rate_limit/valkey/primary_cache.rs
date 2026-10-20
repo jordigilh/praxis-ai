@@ -147,6 +147,15 @@ mod tests {
     }
 
     #[test]
+    fn current_generation_lookup_reports_discovery_in_progress() {
+        let mut cache = PrimaryCache::<&str>::new();
+
+        assert_eq!(cache.begin_discovery(7), DiscoveryStart::Started);
+        assert!(matches!(cache.lookup(7), Lookup::InProgress));
+        assert!(matches!(cache.lookup(8), Lookup::Miss));
+    }
+
+    #[test]
     fn published_primary_is_a_hit_for_its_generation() {
         let mut cache = PrimaryCache::<&str>::new();
         cache.begin_discovery(3);

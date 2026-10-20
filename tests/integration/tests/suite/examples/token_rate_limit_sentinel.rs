@@ -181,6 +181,69 @@ fn sentinel_fixture_admits_through_the_real_proxy_pipeline() {
 
 #[test]
 #[ignore = "requires the Sentinel fixture topology"]
+fn sentinel_fixture_skips_a_dead_first_sentinel_endpoint() {
+    if env::var("TOKEN_RATE_LIMIT_SENTINEL_DEAD_ENDPOINT").is_err() {
+        eprintln!("skipping: TOKEN_RATE_LIMIT_SENTINEL_DEAD_ENDPOINT not set");
+        return;
+    }
+    let backend = StatefulCapturingBackend::new(vec![(200, OPENAI_RESPONSE_BODY.to_owned())]).start_with_shutdown();
+    let config = fixture_config(free_port(), backend.port());
+    let proxy = start_proxy(&config);
+    let raw = http_send(proxy.addr(), &json_post("/v1/chat/completions", "{}"));
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "a dead first Sentinel must not prevent discovery through healthy endpoints: {raw}"
+    );
+    assert_eq!(backend.requests().len(), 1, "the recovered admission invokes upstream once");
+}
+
+#[test]
+#[ignore = "requires the authenticated Sentinel fixture topology"]
+fn sentinel_fixture_supports_separate_sentinel_and_data_credentials() {
+    let has_sentinel_password = env::var("TOKEN_RATE_LIMIT_SENTINEL_PASSWORD")
+        .ok()
+        .is_some_and(|value| !value.is_empty());
+    let has_data_password = env::var("TOKEN_RATE_LIMIT_SENTINEL_DATA_PASSWORD")
+        .ok()
+        .is_some_and(|value| !value.is_empty());
+    if !has_sentinel_password || !has_data_password {
+        eprintln!("skipping: independent Sentinel and data passwords are not set");
+        return;
+    }
+    let backend = StatefulCapturingBackend::new(vec![
+        (200, OPENAI_RESPONSE_BODY.to_owned()),
+        (200, OPENAI_RESPONSE_BODY.to_owned()),
+    ])
+    .start_with_shutdown();
+    let sliding = start_proxy(&fixture_config_with_rule(
+        free_port(),
+        backend.port(),
+        SLIDING_QUOTA_RULE,
+        "separate-credentials-sliding",
+    ));
+    let token_bucket = start_proxy(&fixture_config_with_rule(
+        free_port(),
+        backend.port(),
+        TOKEN_BUCKET_QUOTA_RULE,
+        "separate-credentials-token-bucket",
+    ));
+
+    assert_eq!(
+        parse_status(&http_send(sliding.addr(), &json_post("/v1/chat/completions", "{}"))),
+        200,
+        "sliding-window admission should work with independent credentials"
+    );
+    assert_eq!(
+        parse_status(&http_send(token_bucket.addr(), &json_post("/v1/chat/completions", "{}"))),
+        200,
+        "token-bucket admission should work with independent credentials"
+    );
+    assert_eq!(backend.requests().len(), 2, "both authenticated admissions invoke upstream");
+}
+
+#[test]
+#[ignore = "requires the Sentinel fixture topology"]
 fn sentinel_fixture_enforces_sliding_window_quota_through_the_real_pipeline() {
     if env::var("TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS").is_err() {
         eprintln!("skipping: TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS not set");
