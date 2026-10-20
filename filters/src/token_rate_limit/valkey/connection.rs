@@ -20,10 +20,13 @@ use redis::{
     sentinel::{SentinelClient, SentinelClientBuilder, SentinelServerType},
 };
 
-use super::super::{
-    backend::BackendError,
-    config::{BackendConfig, BackendTopology},
-    expand_backend_url,
+use super::{
+    super::{
+        backend::BackendError,
+        config::{BackendConfig, BackendTopology},
+        expand_backend_url,
+    },
+    primary_cache::{DiscoveryStart, Lookup, PrimaryCache, PublishResult},
 };
 
 /// Default bound on connecting and on every command's response. The configured
@@ -92,7 +95,7 @@ pub(in crate::token_rate_limit) struct ValkeyConnection {
     /// Synchronizes generation advancement with cache publication and checkout.
     generation_lock: Arc<RwLock<()>>,
     /// Cached Sentinel-discovered primary client, invalidated with topology generation.
-    sentinel_primary: Arc<tokio::sync::Mutex<Option<CachedPrimary>>>,
+    sentinel_primary: Arc<tokio::sync::Mutex<PrimaryCache<redis::Client>>>,
     /// Bounds for connection and operation work.
     timeouts: ValkeyTimeouts,
     /// Bounded operator-facing selector label (`redis` or `valkey`).
@@ -165,7 +168,7 @@ impl ValkeyConnection {
             transactions: Arc::new(TransactionConnections::default()),
             generation: Arc::new(AtomicU64::new(0)),
             generation_lock: Arc::new(RwLock::new(())),
-            sentinel_primary: Arc::new(tokio::sync::Mutex::new(None)),
+            sentinel_primary: Arc::new(tokio::sync::Mutex::new(PrimaryCache::new())),
             timeouts,
             backend_name,
         })
@@ -352,7 +355,7 @@ impl ValkeyConnection {
             transactions: Arc::new(TransactionConnections::default()),
             generation: Arc::new(AtomicU64::new(0)),
             generation_lock: Arc::new(RwLock::new(())),
-            sentinel_primary: Arc::new(tokio::sync::Mutex::new(None)),
+            sentinel_primary: Arc::new(tokio::sync::Mutex::new(PrimaryCache::new())),
             timeouts,
             backend_name,
         })
@@ -597,12 +600,7 @@ impl ValkeyConnection {
     }
 
     /// Open a transaction connection through the cached or newly discovered
-    /// Sentinel primary, holding the cache lock across discovery so concurrent
-    /// checkouts coalesce onto one primary lookup per generation.
-    #[expect(
-        clippy::significant_drop_tightening,
-        reason = "hold the primary cache lock to coalesce bounded discovery"
-    )]
+    /// Sentinel primary with bounded, coalesced discovery.
     #[expect(
         clippy::too_many_lines,
         reason = "bounded discovery and primary retry state stay in one lifecycle"
@@ -613,80 +611,76 @@ impl ValkeyConnection {
         deadline: Instant,
         connection_config: &redis::AsyncConnectionConfig,
     ) -> Result<MultiplexedConnection, BackendError> {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let mut primary = tokio::time::timeout(remaining, self.sentinel_primary.lock())
-            .await
-            .map_err(|_elapsed| BackendError::Unavailable("Sentinel primary cache lock timeout".into()))?;
         loop {
             let generation = self.generation.load(Ordering::Acquire);
-            if let Some(cached) = primary.as_ref().filter(|cached| cached.generation == generation) {
-                match self
-                    .open_primary_until(&cached.client, deadline, connection_config)
+            let action = {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let mut cache = tokio::time::timeout(remaining, self.sentinel_primary.lock())
                     .await
+                    .map_err(|_elapsed| BackendError::Unavailable("Sentinel primary cache lock timeout".into()))?;
+                primary_action(&mut cache, generation)
+            };
+            match action {
+                PrimaryAction::Hit(client) => match self.open_primary_until(&client, deadline, connection_config).await
                 {
-                    Ok(connection) if self.generation.load(Ordering::Acquire) == generation => {
-                        return Ok(connection);
+                    Ok(connection) if self.generation.load(Ordering::Acquire) == generation => return Ok(connection),
+                    Ok(_) | Err(_) => {
+                        let mut cache = self.sentinel_primary.lock().await;
+                        cache.invalidate(generation);
                     },
-                    Ok(_) | Err(_) => *primary = None,
-                }
-            }
-
-            let discovery_generation = self.generation.load(Ordering::Acquire);
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let mut sentinel = tokio::time::timeout(remaining, sentinel.lock())
-                .await
-                .map_err(|_elapsed| BackendError::Unavailable("Sentinel discovery lock timeout".into()))?;
-            let client = match tokio::time::timeout(
-                deadline.saturating_duration_since(Instant::now()),
-                sentinel.async_get_client(),
-            )
-            .await
-            {
-                Ok(Ok(client)) => client,
-                Ok(Err(_error)) => {
+                },
+                PrimaryAction::Wait => {
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
                         return Err(BackendError::Unavailable("Sentinel discovery timeout".into()));
                     }
                     tokio::time::sleep(SENTINEL_RETRY_INTERVAL.min(remaining)).await;
-                    continue;
                 },
-                Err(_elapsed) => {
-                    return Err(BackendError::Unavailable("Sentinel discovery timeout".into()));
-                },
-            };
-            drop(sentinel);
-
-            if self.generation.load(Ordering::Acquire) != discovery_generation {
-                continue;
-            }
-            primary.replace(CachedPrimary {
-                client,
-                generation: discovery_generation,
-            });
-            let client = match primary.as_ref() {
-                Some(cached) => &cached.client,
-                None => {
-                    return Err(BackendError::Unavailable(
-                        "Sentinel primary cache publication failed".into(),
-                    ));
-                },
-            };
-            match self.open_primary_until(client, deadline, connection_config).await {
-                Ok(connection) if self.generation.load(Ordering::Acquire) == discovery_generation => {
-                    return Ok(connection);
-                },
-                Ok(_) => *primary = None,
-                Err(error) => {
-                    *primary = None;
-                    if self.generation.load(Ordering::Acquire) == discovery_generation {
+                PrimaryAction::Discover => {
+                    let discovery = {
                         let remaining = deadline.saturating_duration_since(Instant::now());
-                        if remaining.is_zero() {
-                            return Err(error);
-                        }
-                        tokio::time::sleep(SENTINEL_RETRY_INTERVAL.min(remaining)).await;
+                        let mut sentinel = tokio::time::timeout(remaining, sentinel.lock())
+                            .await
+                            .map_err(|_elapsed| BackendError::Unavailable("Sentinel discovery lock timeout".into()))?;
+                        tokio::time::timeout(
+                            deadline.saturating_duration_since(Instant::now()),
+                            sentinel.async_get_client(),
+                        )
+                        .await
+                        .map_err(|_elapsed| BackendError::Unavailable("Sentinel discovery timeout".into()))?
+                        .map_err(|error| map_valkey_error("Sentinel discovery", &error))
+                    };
+                    let client = match discovery {
+                        Ok(client) => client,
+                        Err(error) => {
+                            let mut cache = self.sentinel_primary.lock().await;
+                            cache.invalidate(generation);
+                            let remaining = deadline.saturating_duration_since(Instant::now());
+                            if remaining.is_zero() {
+                                return Err(error);
+                            }
+                            tokio::time::sleep(SENTINEL_RETRY_INTERVAL.min(remaining)).await;
+                            continue;
+                        },
+                    };
+                    let mut cache = self.sentinel_primary.lock().await;
+                    if cache.publish(generation, client.clone()) != PublishResult::Accepted {
+                        continue;
+                    }
+                    drop(cache);
+                    match self.open_primary_until(&client, deadline, connection_config).await {
+                        Ok(connection) if self.generation.load(Ordering::Acquire) == generation => {
+                            return Ok(connection);
+                        },
+                        Ok(_) | Err(_) => {
+                            let mut cache = self.sentinel_primary.lock().await;
+                            cache.invalidate(generation);
+                        },
                     }
                 },
+            }
+            if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                return Err(BackendError::Unavailable("Sentinel discovery timeout".into()));
             }
         }
     }
@@ -714,6 +708,59 @@ impl ValkeyConnection {
     /// Discover a TLS primary with native redis-rs connections. This avoids
     /// redis-rs' internal async Sentinel reconnect path, which does not pass
     /// the caller's TLS configuration through its Sentinel probe.
+    /// Open a TLS connection through a cached or newly discovered primary.
+    async fn open_tls_sentinel(
+        &self,
+        sentinel: &TlsSentinelConfig,
+        deadline: Instant,
+        connection_config: &redis::AsyncConnectionConfig,
+    ) -> Result<MultiplexedConnection, BackendError> {
+        loop {
+            let generation = self.generation.load(Ordering::Acquire);
+            let action = {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let mut cache = tokio::time::timeout(remaining, self.sentinel_primary.lock())
+                    .await
+                    .map_err(|_elapsed| BackendError::Unavailable("Sentinel primary cache lock timeout".into()))?;
+                primary_action(&mut cache, generation)
+            };
+            match action {
+                PrimaryAction::Hit(client) => match self.open_primary_until(&client, deadline, connection_config).await
+                {
+                    Ok(connection) if self.generation.load(Ordering::Acquire) == generation => return Ok(connection),
+                    Ok(_) | Err(_) => {
+                        let mut cache = self.sentinel_primary.lock().await;
+                        cache.invalidate(generation);
+                    },
+                },
+                PrimaryAction::Wait => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(BackendError::Unavailable("Sentinel TLS discovery timeout".into()));
+                    }
+                    tokio::time::sleep(SENTINEL_RETRY_INTERVAL.min(remaining)).await;
+                },
+                PrimaryAction::Discover => {
+                    let (client, connection) = self.discover_tls_primary(sentinel, deadline, connection_config).await?;
+                    let mut cache = self.sentinel_primary.lock().await;
+                    if self.generation.load(Ordering::Acquire) != generation
+                        || cache.publish(generation, client) != PublishResult::Accepted
+                    {
+                        drop(cache);
+                        drop(connection);
+                        continue;
+                    }
+                    drop(cache);
+                    return Ok(connection);
+                },
+            }
+            if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                return Err(BackendError::Unavailable("Sentinel TLS discovery timeout".into()));
+            }
+        }
+    }
+
+    /// Discover and verify a TLS primary through the configured Sentinels.
     #[expect(
         clippy::allow_attributes,
         reason = "this stack-frame allowance must work across supported Clippy versions"
@@ -726,35 +773,13 @@ impl ValkeyConnection {
         clippy::too_many_lines,
         reason = "bounded TLS discovery owns endpoint traversal, role verification, and retry timing"
     )]
-    #[expect(
-        clippy::significant_drop_tightening,
-        reason = "hold the primary cache lock to coalesce bounded TLS discovery"
-    )]
-    async fn open_tls_sentinel(
+    async fn discover_tls_primary(
         &self,
         sentinel: &TlsSentinelConfig,
         deadline: Instant,
         connection_config: &redis::AsyncConnectionConfig,
-    ) -> Result<MultiplexedConnection, BackendError> {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let mut primary = tokio::time::timeout(remaining, self.sentinel_primary.lock())
-            .await
-            .map_err(|_elapsed| BackendError::Unavailable("Sentinel primary cache lock timeout".into()))?;
+    ) -> Result<(redis::Client, MultiplexedConnection), BackendError> {
         loop {
-            let generation = self.generation.load(Ordering::Acquire);
-            if let Some(cached) = primary.as_ref().filter(|cached| cached.generation == generation) {
-                match self
-                    .open_primary_until(&cached.client, deadline, connection_config)
-                    .await
-                {
-                    Ok(connection) if self.generation.load(Ordering::Acquire) == generation => {
-                        return Ok(connection);
-                    },
-                    Ok(_) | Err(_) => *primary = None,
-                }
-            }
-
-            let discovery_generation = self.generation.load(Ordering::Acquire);
             for endpoint in &sentinel.endpoints {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
@@ -824,14 +849,7 @@ impl ValkeyConnection {
                     Err(_elapsed) => continue,
                 };
                 if matches!(role, redis::Role::Primary { .. }) {
-                    if self.generation.load(Ordering::Acquire) != discovery_generation {
-                        continue;
-                    }
-                    primary.replace(CachedPrimary {
-                        client: data_client,
-                        generation: discovery_generation,
-                    });
-                    return Ok(data_connection);
+                    return Ok((data_client, data_connection));
                 }
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -845,19 +863,28 @@ impl ValkeyConnection {
     }
 }
 
+enum PrimaryAction {
+    Hit(redis::Client),
+    Wait,
+    Discover,
+}
+
+fn primary_action(cache: &mut PrimaryCache<redis::Client>, generation: u64) -> PrimaryAction {
+    match cache.lookup(generation) {
+        Lookup::Hit(client) => PrimaryAction::Hit(client.clone()),
+        Lookup::InProgress => PrimaryAction::Wait,
+        Lookup::Miss => match cache.begin_discovery(generation) {
+            DiscoveryStart::Started => PrimaryAction::Discover,
+            DiscoveryStart::InProgress => PrimaryAction::Wait,
+        },
+    }
+}
+
 /// Cached shared connection with a conditional invalidation identity.
 struct CachedConnection {
     /// Multiplexed connection used by plain-command pipelines.
     connection: MultiplexedConnection,
     /// Generation installed with this connection.
-    generation: u64,
-}
-
-/// Sentinel-discovered data client with the topology generation that produced it.
-struct CachedPrimary {
-    /// Client that opens direct data-node connections without another Sentinel query.
-    client: redis::Client,
-    /// Topology generation at which the primary was discovered.
     generation: u64,
 }
 

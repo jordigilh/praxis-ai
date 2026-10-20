@@ -541,6 +541,7 @@ fn validate_accounting_config(stored: Option<&str>, expected: &str) -> Result<()
 }
 
 mod connection;
+mod primary_cache;
 mod sliding_window;
 mod token_bucket;
 mod window;
