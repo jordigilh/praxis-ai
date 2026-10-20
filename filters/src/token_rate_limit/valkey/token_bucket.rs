@@ -1389,6 +1389,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps the deadline-contention setup and assertions together"
+    )]
     async fn token_bucket_fails_closed_when_aborts_outlast_the_deadline() {
         let Some(backend) = backend("tb-contended", 100, 1.0, 5_000) else {
             return;

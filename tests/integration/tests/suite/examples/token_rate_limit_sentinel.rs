@@ -287,6 +287,10 @@ fn sentinel_health_noreplicas_failure() {
         eprintln!("skipping: TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS not set");
         return;
     }
+    if env::var("TOKEN_RATE_LIMIT_SENTINEL_REPLICATION_HEALTH_TEST").as_deref() != Ok("1") {
+        eprintln!("skipping: replication health lane is not enabled");
+        return;
+    }
     let on_failure = env::var("TOKEN_RATE_LIMIT_SENTINEL_ON_FAILURE").expect("fixture must set on_failure");
     assert!(matches!(on_failure.as_str(), "closed" | "open"));
     let backend = StatefulCapturingBackend::new(vec![(200, OPENAI_RESPONSE_BODY.to_owned())]).start_with_shutdown();
