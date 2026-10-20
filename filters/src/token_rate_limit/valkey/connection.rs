@@ -535,40 +535,55 @@ impl ValkeyConnection {
         let mut primary = tokio::time::timeout(remaining, self.sentinel_primary.lock())
             .await
             .map_err(|_elapsed| BackendError::Unavailable("Sentinel primary cache lock timeout".into()))?;
-        let generation = self.generation.load(Ordering::Acquire);
-        if primary.as_ref().is_some_and(|cached| cached.generation == generation) {
-            let cached = primary.as_ref().expect("checked above");
-            match self
-                .open_primary_until(&cached.client, deadline, connection_config)
-                .await
-            {
-                Ok(connection) => return Ok(connection),
-                Err(_) => *primary = None,
+        loop {
+            let generation = self.generation.load(Ordering::Acquire);
+            if primary.as_ref().is_some_and(|cached| cached.generation == generation) {
+                let cached = primary.as_ref().expect("checked above");
+                match self
+                    .open_primary_until(&cached.client, deadline, connection_config)
+                    .await
+                {
+                    Ok(connection) if self.generation.load(Ordering::Acquire) == generation => {
+                        return Ok(connection);
+                    },
+                    Ok(_) | Err(_) => *primary = None,
+                }
             }
-        }
 
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let mut sentinel = tokio::time::timeout(remaining, sentinel.lock())
+            let discovery_generation = self.generation.load(Ordering::Acquire);
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let mut sentinel = tokio::time::timeout(remaining, sentinel.lock())
+                .await
+                .map_err(|_elapsed| BackendError::Unavailable("Sentinel discovery lock timeout".into()))?;
+            let client = tokio::time::timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                sentinel.async_get_client(),
+            )
             .await
-            .map_err(|_elapsed| BackendError::Unavailable("Sentinel discovery lock timeout".into()))?;
-        let client = tokio::time::timeout(
-            deadline.saturating_duration_since(Instant::now()),
-            sentinel.async_get_client(),
-        )
-        .await
-        .map_err(|_elapsed| BackendError::Unavailable("Sentinel discovery timeout".into()))?
-        .map_err(|error| map_valkey_error("Sentinel discovery", &error))?;
-        drop(sentinel);
+            .map_err(|_elapsed| BackendError::Unavailable("Sentinel discovery timeout".into()))?
+            .map_err(|error| map_valkey_error("Sentinel discovery", &error))?;
+            drop(sentinel);
 
-        let generation = self.generation.load(Ordering::Acquire);
-        primary.replace(CachedPrimary { client, generation });
-        let client = &primary.as_ref().expect("primary was just cached").client;
-        match self.open_primary_until(client, deadline, connection_config).await {
-            Ok(connection) => Ok(connection),
-            Err(error) => {
-                *primary = None;
-                Err(error)
-            },
+            if self.generation.load(Ordering::Acquire) != discovery_generation {
+                continue;
+            }
+            primary.replace(CachedPrimary {
+                client,
+                generation: discovery_generation,
+            });
+            let client = &primary.as_ref().expect("primary was just cached").client;
+            match self.open_primary_until(client, deadline, connection_config).await {
+                Ok(connection) if self.generation.load(Ordering::Acquire) == discovery_generation => {
+                    return Ok(connection);
+                },
+                Ok(_) => *primary = None,
+                Err(error) => {
+                    *primary = None;
+                    if self.generation.load(Ordering::Acquire) == discovery_generation {
+                        return Err(error);
+                    }
+                },
+            }
         }
     }
 
@@ -617,19 +632,22 @@ impl ValkeyConnection {
         let mut primary = tokio::time::timeout(remaining, self.sentinel_primary.lock())
             .await
             .map_err(|_elapsed| BackendError::Unavailable("Sentinel primary cache lock timeout".into()))?;
-        let generation = self.generation.load(Ordering::Acquire);
-        if primary.as_ref().is_some_and(|cached| cached.generation == generation) {
-            let cached = primary.as_ref().expect("checked above");
-            match self
-                .open_primary_until(&cached.client, deadline, connection_config)
-                .await
-            {
-                Ok(connection) => return Ok(connection),
-                Err(_) => *primary = None,
-            }
-        }
-
         loop {
+            let generation = self.generation.load(Ordering::Acquire);
+            if primary.as_ref().is_some_and(|cached| cached.generation == generation) {
+                let cached = primary.as_ref().expect("checked above");
+                match self
+                    .open_primary_until(&cached.client, deadline, connection_config)
+                    .await
+                {
+                    Ok(connection) if self.generation.load(Ordering::Acquire) == generation => {
+                        return Ok(connection);
+                    },
+                    Ok(_) | Err(_) => *primary = None,
+                }
+            }
+
+            let discovery_generation = self.generation.load(Ordering::Acquire);
             for endpoint in &sentinel.endpoints {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
@@ -699,10 +717,12 @@ impl ValkeyConnection {
                     Err(_elapsed) => continue,
                 };
                 if matches!(role, redis::Role::Primary { .. }) {
-                    let generation = self.generation.load(Ordering::Acquire);
+                    if self.generation.load(Ordering::Acquire) != discovery_generation {
+                        continue;
+                    }
                     primary.replace(CachedPrimary {
                         client: data_client,
-                        generation,
+                        generation: discovery_generation,
                     });
                     return Ok(data_connection);
                 }
