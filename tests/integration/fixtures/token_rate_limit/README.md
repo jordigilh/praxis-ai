@@ -49,9 +49,10 @@ admission behavior.
 Set `TOKEN_RATE_LIMIT_SENTINEL_DEBUG=1` to print container logs when topology
 readiness or planned failover fails.
 
-For an authenticated run, set either or both of
+The fixture generates independent random data-node and Sentinel passwords for
+each run. For a diagnostic run, set either or both of
 `TOKEN_RATE_LIMIT_SENTINEL_DATA_PASSWORD` and
-`TOKEN_RATE_LIMIT_SENTINEL_PASSWORD` in the fixture environment. The script
-configures separate data-node and Sentinel credentials, passes CLI credentials
-over stdin, and exports them only to the child test process; do not place them
-in the repository or command-line arguments.
+`TOKEN_RATE_LIMIT_SENTINEL_PASSWORD` in the fixture environment to override
+them. The script configures separate credentials, passes CLI credentials over
+stdin, and exports them only to the child test process; do not place secrets in
+the repository or command-line arguments.

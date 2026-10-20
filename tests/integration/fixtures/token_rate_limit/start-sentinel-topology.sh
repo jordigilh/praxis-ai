@@ -16,6 +16,20 @@ env_file_written=0
 debug=${TOKEN_RATE_LIMIT_SENTINEL_DEBUG:-}
 replication_health_test=${TOKEN_RATE_LIMIT_SENTINEL_REPLICATION_HEALTH_TEST:-}
 on_failure=${TOKEN_RATE_LIMIT_SENTINEL_ON_FAILURE:-}
+
+random_password() {
+    openssl rand -hex 24
+}
+
+# Authenticated fixture coverage is the default, but callers may override the
+# values for a diagnostic run. Keep the two generated credentials independent
+# and export them only to the child process below.
+[[ -n "$data_password" ]] || data_password=$(random_password)
+[[ -n "$sentinel_password" ]] || sentinel_password=$(random_password)
+[[ "$data_password" != "$sentinel_password" ]] || {
+    echo "Sentinel and data credentials must be distinct" >&2
+    exit 2
+}
 while (($#)); do
     case "$1" in
         --product) product=$2; shift 2 ;;

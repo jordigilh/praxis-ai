@@ -55,9 +55,6 @@ jobs:
       SENTINEL_PRODUCT: ${{ matrix.product }}
       SENTINEL_IMAGE: ${{ matrix.image }}
       SENTINEL_DEAD_ENDPOINT: redis://127.0.0.1:1
-      # Fixture-only credentials; these are intentionally non-secret values.
-      TOKEN_RATE_LIMIT_SENTINEL_DATA_PASSWORD: praxis-data-ci
-      TOKEN_RATE_LIMIT_SENTINEL_PASSWORD: praxis-sentinel-ci
       CONTAINER_ENGINE: docker
 
     steps:

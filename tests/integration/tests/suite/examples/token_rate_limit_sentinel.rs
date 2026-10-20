@@ -195,7 +195,11 @@ fn sentinel_fixture_skips_a_dead_first_sentinel_endpoint() {
         200,
         "a dead first Sentinel must not prevent discovery through healthy endpoints: {raw}"
     );
-    assert_eq!(backend.requests().len(), 1, "the recovered admission invokes upstream once");
+    assert_eq!(
+        backend.requests().len(),
+        1,
+        "the recovered admission invokes upstream once"
+    );
 }
 
 #[test]
@@ -211,6 +215,11 @@ fn sentinel_fixture_supports_separate_sentinel_and_data_credentials() {
         eprintln!("skipping: independent Sentinel and data passwords are not set");
         return;
     }
+    assert_ne!(
+        env::var("TOKEN_RATE_LIMIT_SENTINEL_PASSWORD").ok(),
+        env::var("TOKEN_RATE_LIMIT_SENTINEL_DATA_PASSWORD").ok(),
+        "Sentinel and data credentials must be independent"
+    );
     let backend = StatefulCapturingBackend::new(vec![
         (200, OPENAI_RESPONSE_BODY.to_owned()),
         (200, OPENAI_RESPONSE_BODY.to_owned()),
@@ -235,11 +244,18 @@ fn sentinel_fixture_supports_separate_sentinel_and_data_credentials() {
         "sliding-window admission should work with independent credentials"
     );
     assert_eq!(
-        parse_status(&http_send(token_bucket.addr(), &json_post("/v1/chat/completions", "{}"))),
+        parse_status(&http_send(
+            token_bucket.addr(),
+            &json_post("/v1/chat/completions", "{}")
+        )),
         200,
         "token-bucket admission should work with independent credentials"
     );
-    assert_eq!(backend.requests().len(), 2, "both authenticated admissions invoke upstream");
+    assert_eq!(
+        backend.requests().len(),
+        2,
+        "both authenticated admissions invoke upstream"
+    );
 }
 
 #[test]
