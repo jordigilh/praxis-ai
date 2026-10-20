@@ -1587,6 +1587,87 @@ mod tests {
         assert!(connection.connection.lock().unwrap().is_none());
     }
 
+    #[tokio::test]
+    async fn invalidating_without_a_matching_shared_generation_is_a_noop() {
+        let connection = ValkeyConnection::standalone_with_timeouts_and_name(
+            "redis://127.0.0.1:1".into(),
+            ValkeyTimeouts::default(),
+            "valkey",
+        )
+        .unwrap();
+        connection.invalidate(7).await;
+        assert_eq!(connection.generation.load(Ordering::Acquire), 0);
+        assert_eq!(connection.transactions.generation.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the failed checkout result is inspected before the test connection is dropped"
+    )]
+    async fn closed_transaction_pool_fails_before_opening_a_socket() {
+        let connection = ValkeyConnection::standalone_with_timeouts_and_name(
+            "redis://127.0.0.1:1".into(),
+            ValkeyTimeouts::default(),
+            "valkey",
+        )
+        .unwrap();
+        connection.transactions.semaphore.close();
+        let result = connection.transaction().await;
+        assert!(matches!(result, Err(BackendError::Unavailable(message)) if message.contains("pool closed")));
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the bounded pool timeout result is inspected before the test connection is dropped"
+    )]
+    async fn exhausted_transaction_pool_returns_within_operation_deadline() {
+        let mut connection = ValkeyConnection::standalone_with_timeouts_and_name(
+            "redis://127.0.0.1:1".into(),
+            ValkeyTimeouts {
+                connect: Duration::from_millis(5),
+                operation: Duration::from_millis(5),
+                discovery: Duration::from_millis(5),
+            },
+            "valkey",
+        )
+        .unwrap();
+        connection.transactions = Arc::new(super::TransactionConnections {
+            idle: tokio::sync::Mutex::new(Vec::new()),
+            semaphore: Arc::new(tokio::sync::Semaphore::new(0)),
+            generation: std::sync::atomic::AtomicU64::new(0),
+        });
+        let started = Instant::now();
+        let result = connection.transaction().await;
+        assert!(matches!(result, Err(BackendError::Unavailable(message)) if message.contains("pool exhausted")));
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn expired_connection_deadlines_fail_before_transport_work() {
+        let connection = ValkeyConnection::standalone_with_timeouts_and_name(
+            "redis://127.0.0.1:1".into(),
+            ValkeyTimeouts::default(),
+            "valkey",
+        )
+        .unwrap();
+        let config = redis::AsyncConnectionConfig::new();
+        let open = connection.open_until(Instant::now() - Duration::from_millis(1)).await;
+        assert!(matches!(open, Err(BackendError::Unavailable(message)) if message.contains("deadline elapsed")));
+        let client = redis::Client::open("redis://127.0.0.1:1").unwrap();
+        let primary = connection
+            .open_primary_until(&client, Instant::now() - Duration::from_millis(1), &config)
+            .await;
+        assert!(matches!(primary, Err(BackendError::Unavailable(message)) if message.contains("deadline elapsed")));
+        let invalidation = connection
+            .invalidate_primary_until(0, Instant::now() - Duration::from_millis(1))
+            .await;
+        assert!(
+            matches!(invalidation, Err(BackendError::Unavailable(message)) if message.contains("cache lock timeout"))
+        );
+    }
+
     #[test]
     fn tls_sentinel_accepts_the_valkey_tls_scheme() {
         let connection = ValkeyConnection::sentinel(
