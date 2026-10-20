@@ -7,7 +7,7 @@
 
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -84,11 +84,13 @@ pub(in crate::token_rate_limit) struct ValkeyConnection {
     source: Arc<ConnectionSource>,
     /// Cached multiplexed connection for pipelines; cleared on any error so
     /// the next call reconnects instead of reusing a wedged socket.
-    connection: Arc<tokio::sync::Mutex<Option<CachedConnection>>>,
+    connection: Arc<Mutex<Option<CachedConnection>>>,
     /// Dedicated connections for `WATCH` transactions.
     transactions: Arc<TransactionConnections>,
     /// Generation of the cached shared connection.
     generation: Arc<AtomicU64>,
+    /// Synchronizes generation advancement with cache publication and checkout.
+    generation_lock: Arc<RwLock<()>>,
     /// Cached Sentinel-discovered primary client, invalidated with topology generation.
     sentinel_primary: Arc<tokio::sync::Mutex<Option<CachedPrimary>>>,
     /// Bounds for connection and operation work.
@@ -159,9 +161,10 @@ impl ValkeyConnection {
         let client = redis::Client::open(url).map_err(|error| BackendError::Unavailable(error.to_string()))?;
         Ok(Self {
             source: Arc::new(ConnectionSource::Standalone(client)),
-            connection: Arc::new(tokio::sync::Mutex::new(None)),
+            connection: Arc::new(Mutex::new(None)),
             transactions: Arc::new(TransactionConnections::default()),
             generation: Arc::new(AtomicU64::new(0)),
+            generation_lock: Arc::new(RwLock::new(())),
             sentinel_primary: Arc::new(tokio::sync::Mutex::new(None)),
             timeouts,
             backend_name,
@@ -345,9 +348,10 @@ impl ValkeyConnection {
         };
         Ok(Self {
             source: Arc::new(source),
-            connection: Arc::new(tokio::sync::Mutex::new(None)),
+            connection: Arc::new(Mutex::new(None)),
             transactions: Arc::new(TransactionConnections::default()),
             generation: Arc::new(AtomicU64::new(0)),
+            generation_lock: Arc::new(RwLock::new(())),
             sentinel_primary: Arc::new(tokio::sync::Mutex::new(None)),
             timeouts,
             backend_name,
@@ -389,23 +393,30 @@ impl ValkeyConnection {
     /// next operation performs fresh native discovery; no failed mutation is
     /// replayed here.
     async fn invalidate(&self, generation: u64) {
-        let Ok(mut cached) = tokio::time::timeout(self.timeouts.operation, self.connection.lock()).await else {
-            return;
+        let should_invalidate = {
+            let _generation_guard = self
+                .generation_lock
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut cached = self
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if cached.as_ref().is_some_and(|entry| entry.generation == generation) {
+                *cached = None;
+                drop(cached);
+                self.generation
+                    .fetch_max(generation.saturating_add(1), Ordering::AcqRel);
+                self.transactions.generation.fetch_add(1, Ordering::AcqRel);
+                true
+            } else {
+                false
+            }
         };
-        if cached.as_ref().is_some_and(|entry| entry.generation == generation) {
-            *cached = None;
-            drop(cached);
-            if let Ok(mut primary) = tokio::time::timeout(self.timeouts.operation, self.sentinel_primary.lock()).await
-                && primary.as_ref().is_some_and(|entry| entry.generation == generation)
-            {
-                *primary = None;
-            }
-            self.generation
-                .fetch_max(generation.saturating_add(1), Ordering::AcqRel);
-            self.transactions.generation.fetch_add(1, Ordering::AcqRel);
-            if let Ok(mut idle) = tokio::time::timeout(self.timeouts.operation, self.transactions.idle.lock()).await {
-                idle.clear();
-            }
+        if should_invalidate
+            && let Ok(mut idle) = tokio::time::timeout(self.timeouts.operation, self.transactions.idle.lock()).await
+        {
+            idle.clear();
         }
     }
 
@@ -441,12 +452,20 @@ impl ValkeyConnection {
                     connection,
                     generation: pooled_generation,
                 }) if pooled_generation == generation => {
+                    let _generation_guard = self
+                        .generation_lock
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     break (connection, generation, self.generation.load(Ordering::Acquire));
                 },
                 Some(PooledConnection { .. }) => {},
                 None => {
                     let opening_shared_generation = self.generation.load(Ordering::Acquire);
                     let connection = self.open().await?;
+                    let _generation_guard = self
+                        .generation_lock
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if self.generation.load(Ordering::Acquire) != opening_shared_generation {
                         drop(connection);
                         continue;
@@ -462,6 +481,7 @@ impl ValkeyConnection {
             generation,
             shared_generation: Arc::clone(&self.generation),
             shared_generation_at_checkout,
+            generation_lock: Arc::clone(&self.generation_lock),
         })
     }
 
@@ -478,9 +498,10 @@ impl ValkeyConnection {
         };
         let deadline = Instant::now() + lock_timeout;
         {
-            let cached = tokio::time::timeout(lock_timeout, self.connection.lock())
-                .await
-                .map_err(|_elapsed| BackendError::Unavailable("shared connection lock timeout".into()))?;
+            let cached = self
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let current_generation = self.generation.load(Ordering::Acquire);
             if let Some(entry) = cached.as_ref()
                 && entry.generation == current_generation
@@ -493,15 +514,20 @@ impl ValkeyConnection {
             let opening_generation = self.generation.load(Ordering::Acquire);
             let connection = self.open_until(deadline).await?;
             if self.generation.load(Ordering::Acquire) == opening_generation {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                let mut cached = tokio::time::timeout(remaining, self.connection.lock())
-                    .await
-                    .map_err(|_elapsed| BackendError::Unavailable("shared connection lock timeout".into()))?;
+                let generation_guard = self
+                    .generation_lock
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut cached = self
+                    .connection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let current_generation = self.generation.load(Ordering::Acquire);
                 if let Some(entry) = cached.as_ref()
                     && entry.generation == current_generation
                 {
                     drop(connection);
+                    drop(generation_guard);
                     return Ok((entry.connection.clone(), entry.generation));
                 }
                 if current_generation == opening_generation {
@@ -510,9 +536,11 @@ impl ValkeyConnection {
                         generation: opening_generation,
                     });
                     drop(cached);
+                    drop(generation_guard);
                     return Ok((connection, opening_generation));
                 }
                 drop(cached);
+                drop(generation_guard);
                 drop(connection);
             } else {
                 drop(connection);
@@ -877,6 +905,8 @@ pub(super) struct TransactionConnection {
     shared_generation: Arc<AtomicU64>,
     /// Shared generation observed when this transaction was checked out.
     shared_generation_at_checkout: u64,
+    /// Synchronizes generation advancement with transaction checkout.
+    generation_lock: Arc<RwLock<()>>,
 }
 
 /// Whether a checked-out transaction still belongs to both current pool
@@ -939,6 +969,10 @@ impl TransactionConnection {
 impl Drop for TransactionConnection {
     fn drop(&mut self) {
         if self.connection.is_some() {
+            let _generation_guard = self
+                .generation_lock
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.pool.generation.fetch_add(1, Ordering::AcqRel);
             self.shared_generation
                 .fetch_max(self.shared_generation_at_checkout.saturating_add(1), Ordering::AcqRel);
@@ -1044,7 +1078,7 @@ mod tests {
         pipe.cmd("GET").arg("praxis:test:sentinel-unavailable");
         let result: Result<(Option<String>,), BackendError> = connection.pipeline(&pipe).await;
         assert!(result.is_err(), "unavailable Sentinel must fail closed");
-        assert!(connection.connection.lock().await.is_none());
+        assert!(connection.connection.lock().unwrap().is_none());
     }
 
     #[test]
@@ -1221,7 +1255,7 @@ mod tests {
         let (value,): (i64,) = connection.pipeline(&pipe).await.unwrap();
         assert_eq!(value, 3, "the pipeline ran in order on the shared connection");
         assert!(
-            connection.connection.lock().await.is_some(),
+            connection.connection.lock().unwrap().is_some(),
             "a successful pipeline keeps the cached connection"
         );
         drop(connection);
@@ -1346,7 +1380,7 @@ mod tests {
             "the failure must arrive near the configured timeout"
         );
         assert!(
-            connection.connection.lock().await.is_none(),
+            connection.connection.lock().unwrap().is_none(),
             "a failed pipeline drops the cached connection"
         );
         drop(connection);
