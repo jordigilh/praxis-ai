@@ -5,6 +5,11 @@
 //! multiplexed connection for pipelines, and a small pool of dedicated
 //! connections for `WATCH` transactions, which are per-connection state.
 
+#![allow(
+    clippy::large_futures,
+    reason = "bounded Valkey connection futures compose the transport state machine and deadline guards"
+)]
+
 use std::{
     sync::{
         Arc, Mutex, RwLock,
@@ -13,18 +18,19 @@ use std::{
     time::{Duration, Instant},
 };
 
+use metrics::counter;
 use praxis_filter::FilterError;
 use rand::RngExt as _;
 use redis::{
     aio::MultiplexedConnection,
-    sentinel::{SentinelClient, SentinelClientBuilder, SentinelServerType},
+    sentinel::{SentinelClientBuilder, SentinelServerType},
 };
 
 use super::{
     super::{
         backend::BackendError,
         config::{BackendConfig, BackendTopology},
-        expand_backend_url,
+        expand_backend_url_with,
     },
     primary_cache::{DiscoveryStart, Lookup, PrimaryCache, PublishResult},
 };
@@ -36,6 +42,17 @@ pub(in crate::token_rate_limit) const VALKEY_TIMEOUT: Duration = Duration::from_
 pub(in crate::token_rate_limit) const SENTINEL_TIMEOUT: Duration = Duration::from_secs(3);
 /// Delay between bounded native Sentinel convergence attempts.
 const SENTINEL_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+/// Maximum time spent on one plain redis-rs Sentinel endpoint attempt.
+///
+/// The public `SentinelClient` API does not accept an async connection config
+/// for its internal Sentinel probes. Building one client per endpoint lets the
+/// caller apply this outer bound without depending on redis-rs internals.
+const SENTINEL_ENDPOINT_TIMEOUT: Duration = VALKEY_TIMEOUT;
+
+/// Prometheus counter for bounded Sentinel discovery attempts.
+const METRIC_SENTINEL_DISCOVERY: &str = "praxis_trl_sentinel_discovery_total";
+/// Prometheus counter for generation-fenced Sentinel recovery outcomes.
+const METRIC_SENTINEL_FAILOVER: &str = "praxis_trl_sentinel_failover_total";
 
 /// Finite bounds for backend connection work.
 #[derive(Debug, Clone, Copy)]
@@ -103,13 +120,18 @@ pub(in crate::token_rate_limit) struct ValkeyConnection {
 }
 
 /// Lazy source for standalone or Sentinel-discovered writable-primary data.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the redis-rs standalone client is intentionally kept behind this source boundary"
+)]
 enum ConnectionSource {
     /// Fixed standalone Redis/Valkey client.
     Standalone(redis::Client),
-    /// Native Sentinel client plus its bounded discovery deadline.
+    /// Plain Sentinel endpoints and credentials used to build one public
+    /// redis-rs Sentinel client per endpoint attempt.
     Sentinel {
-        /// Serialized access to the native discovery cache.
-        client: tokio::sync::Mutex<SentinelClient>,
+        /// Immutable Sentinel endpoint and credential settings.
+        config: Arc<PlainSentinelConfig>,
     },
     /// TLS Sentinel discovery using redis-rs connections directly. The
     /// redis-rs high-level async Sentinel helper does not propagate its
@@ -120,6 +142,22 @@ enum ConnectionSource {
         /// Immutable Sentinel endpoints and credential settings.
         config: Arc<TlsSentinelConfig>,
     },
+}
+
+/// Native redis-rs inputs for bounded plain Sentinel discovery.
+struct PlainSentinelConfig {
+    /// Ordered plain Sentinel endpoint addresses.
+    endpoints: Vec<redis::ConnectionAddr>,
+    /// Monitored primary service name.
+    service_name: String,
+    /// Credentials used by Sentinel probes.
+    sentinel_username: Option<String>,
+    /// Credentials used by Sentinel probes.
+    sentinel_password: Option<String>,
+    /// Credentials used by discovered data nodes.
+    redis_username: Option<String>,
+    /// Credentials used by discovered data nodes.
+    redis_password: Option<String>,
 }
 
 /// Native redis-rs inputs for the TLS Sentinel discovery fallback.
@@ -177,10 +215,23 @@ impl ValkeyConnection {
     /// Build the shared backend transport from filter configuration. All
     /// Redis/Valkey topology, credential, TLS, and timeout decisions stay in
     /// this backend module; admission code receives only the backend trait.
-    #[expect(clippy::too_many_lines, reason = "topology construction is one backend boundary")]
     pub(in crate::token_rate_limit) fn from_backend_config(
         backend: &BackendConfig,
         backend_name: &'static str,
+    ) -> Result<Self, FilterError> {
+        Self::from_backend_config_with(backend, backend_name, |name| std::env::var(name))
+    }
+
+    /// Build the shared backend with an injected environment lookup.
+    ///
+    /// Production uses [`std::env::var`]. Keeping the lookup injectable makes
+    /// endpoint-scheme decisions deterministic in tests without mutating the
+    /// process-global environment.
+    #[expect(clippy::too_many_lines, reason = "topology construction is one backend boundary")]
+    pub(in crate::token_rate_limit) fn from_backend_config_with(
+        backend: &BackendConfig,
+        backend_name: &'static str,
+        lookup: impl Fn(&str) -> Result<String, std::env::VarError> + Copy,
     ) -> Result<Self, FilterError> {
         let timeouts = ValkeyTimeouts {
             connect: backend.connect_timeout,
@@ -192,15 +243,23 @@ impl ValkeyConnection {
         };
         let connection = match backend.topology.as_ref() {
             Some(BackendTopology::Standalone(url)) => {
-                Self::standalone_with_timeouts_and_name(expand_backend_url(url)?, timeouts, backend_name)?
+                Self::standalone_with_timeouts_and_name(expand_backend_url_with(url, lookup)?, timeouts, backend_name)?
             },
             Some(BackendTopology::Sentinel(sentinel)) => {
                 let endpoints = sentinel
                     .endpoints
                     .iter()
-                    .map(|endpoint| expand_backend_url(endpoint))
+                    .map(|endpoint| expand_backend_url_with(endpoint, lookup))
                     .collect::<Result<Vec<_>, _>>()?;
-                let expand_credential = |value: &Option<String>| value.as_deref().map(expand_backend_url).transpose();
+                let expand_credential = |value: &Option<String>| {
+                    value
+                        .as_deref()
+                        .map(|value| expand_backend_url_with(value, lookup))
+                        .transpose()
+                };
+                let tls = endpoints
+                    .first()
+                    .is_some_and(|endpoint| endpoint.starts_with("rediss://") || endpoint.starts_with("valkeys://"));
                 Self::sentinel(
                     endpoints,
                     sentinel.service_name.clone(),
@@ -208,9 +267,7 @@ impl ValkeyConnection {
                     expand_credential(&sentinel.sentinel_password)?,
                     expand_credential(&sentinel.redis_username)?,
                     expand_credential(&sentinel.redis_password)?,
-                    sentinel.endpoints.first().is_some_and(|endpoint| {
-                        endpoint.starts_with("rediss://") || endpoint.starts_with("valkeys://")
-                    }),
+                    tls,
                     timeouts,
                     backend_name,
                 )?
@@ -266,42 +323,14 @@ impl ValkeyConnection {
                 Ok(info.addr().clone())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let sentinel_username_for_source = sentinel_username.clone();
-        let sentinel_password_for_source = sentinel_password.clone();
-        let redis_username_for_source = redis_username.clone();
-        let redis_password_for_source = redis_password.clone();
-        let mut builder =
-            SentinelClientBuilder::new(addresses.clone(), service_name.clone(), SentinelServerType::Master)
-                .map_err(|error| BackendError::Unavailable(format!("Sentinel configuration: {error}")))?;
-        if let Some(value) = sentinel_username {
-            builder = builder.set_client_to_sentinel_username(value);
-        }
-        if let Some(value) = sentinel_password {
-            builder = builder.set_client_to_sentinel_password(value);
-        }
-        if let Some(value) = redis_username {
-            builder = builder.set_client_to_redis_username(value);
-        }
-        if let Some(value) = redis_password {
-            builder = builder.set_client_to_redis_password(value);
-        }
-        if tls {
-            let mode = redis::TlsMode::Secure;
-            builder = builder
-                .set_client_to_sentinel_tls_mode(mode)
-                .set_client_to_redis_tls_mode(mode);
-        }
-        let client = builder
-            .build()
-            .map_err(|error| BackendError::Unavailable(format!("Sentinel configuration: {error}")))?;
         let source = if tls {
             let sentinel_settings = redis::RedisConnectionInfo::default();
-            let sentinel_settings = if let Some(value) = &sentinel_username_for_source {
+            let sentinel_settings = if let Some(value) = &sentinel_username {
                 sentinel_settings.set_username(value)
             } else {
                 sentinel_settings
             };
-            let sentinel_settings = if let Some(value) = &sentinel_password_for_source {
+            let sentinel_settings = if let Some(value) = &sentinel_password {
                 sentinel_settings.set_password(value)
             } else {
                 sentinel_settings
@@ -327,12 +356,12 @@ impl ValkeyConnection {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let data_settings = redis::RedisConnectionInfo::default();
-            let data_settings = if let Some(value) = &redis_username_for_source {
+            let data_settings = if let Some(value) = &redis_username {
                 data_settings.set_username(value)
             } else {
                 data_settings
             };
-            let data_settings = if let Some(value) = &redis_password_for_source {
+            let data_settings = if let Some(value) = &redis_password {
                 data_settings.set_password(value)
             } else {
                 data_settings
@@ -346,7 +375,14 @@ impl ValkeyConnection {
             }
         } else {
             ConnectionSource::Sentinel {
-                client: tokio::sync::Mutex::new(client),
+                config: Arc::new(PlainSentinelConfig {
+                    endpoints: addresses,
+                    service_name,
+                    sentinel_username,
+                    sentinel_password,
+                    redis_username,
+                    redis_password,
+                }),
             }
         };
         Ok(Self {
@@ -592,7 +628,9 @@ impl ValkeyConnection {
                     .map_err(|_elapsed| BackendError::Unavailable("backend connection deadline elapsed".into()))?
                     .map_err(|error| map_valkey_error("connection", &error))
             },
-            ConnectionSource::Sentinel { client } => self.open_sentinel_until(client, deadline, &config).await,
+            ConnectionSource::Sentinel { config: sentinel } => {
+                self.open_sentinel_until(sentinel, deadline, &config).await
+            },
             ConnectionSource::SentinelTls { config: sentinel } => {
                 self.open_tls_sentinel(sentinel, deadline, &config).await
             },
@@ -605,84 +643,164 @@ impl ValkeyConnection {
         clippy::too_many_lines,
         reason = "bounded discovery and primary retry state stay in one lifecycle"
     )]
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the discovery action owns a cancellation-resetting cache lease across the match"
+    )]
     async fn open_sentinel_until(
         &self,
-        sentinel: &tokio::sync::Mutex<SentinelClient>,
+        sentinel: &PlainSentinelConfig,
         deadline: Instant,
         connection_config: &redis::AsyncConnectionConfig,
     ) -> Result<MultiplexedConnection, BackendError> {
+        let mut failover_pending = false;
         loop {
             let generation = self.generation.load(Ordering::Acquire);
             let action = {
                 let remaining = deadline.saturating_duration_since(Instant::now());
-                let mut cache = tokio::time::timeout(remaining, self.sentinel_primary.lock())
-                    .await
-                    .map_err(|_elapsed| BackendError::Unavailable("Sentinel primary cache lock timeout".into()))?;
-                primary_action(&mut cache, generation)
+                let cache = match tokio::time::timeout(remaining, Arc::clone(&self.sentinel_primary).lock_owned()).await
+                {
+                    Ok(cache) => cache,
+                    Err(_elapsed) => {
+                        record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
+                        return Err(BackendError::Unavailable("Sentinel primary cache lock timeout".into()));
+                    },
+                };
+                primary_action(cache, generation)
             };
             match action {
                 PrimaryAction::Hit(client) => match self.open_primary_until(&client, deadline, connection_config).await
                 {
-                    Ok(connection) if self.generation.load(Ordering::Acquire) == generation => return Ok(connection),
+                    Ok(connection) if self.generation.load(Ordering::Acquire) == generation => {
+                        if failover_pending {
+                            record_sentinel_failover(self.backend_name, "recovered");
+                        }
+                        return Ok(connection);
+                    },
                     Ok(_) | Err(_) => {
-                        let mut cache = self.sentinel_primary.lock().await;
-                        cache.invalidate(generation);
+                        failover_pending = true;
+                        if let Err(error) = self.invalidate_primary_until(generation, deadline).await {
+                            record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
+                            return Err(error);
+                        }
                     },
                 },
                 PrimaryAction::Wait => {
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
+                        record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
                         return Err(BackendError::Unavailable("Sentinel discovery timeout".into()));
                     }
                     tokio::time::sleep(SENTINEL_RETRY_INTERVAL.min(remaining)).await;
                 },
-                PrimaryAction::Discover => {
-                    let discovery = {
-                        let remaining = deadline.saturating_duration_since(Instant::now());
-                        let mut sentinel = tokio::time::timeout(remaining, sentinel.lock())
-                            .await
-                            .map_err(|_elapsed| BackendError::Unavailable("Sentinel discovery lock timeout".into()))?;
-                        tokio::time::timeout(
-                            deadline.saturating_duration_since(Instant::now()),
-                            sentinel.async_get_client(),
-                        )
-                        .await
-                        .map_err(|_elapsed| BackendError::Unavailable("Sentinel discovery timeout".into()))?
-                        .map_err(|error| map_valkey_error("Sentinel discovery", &error))
-                    };
+                PrimaryAction::Discover(lease) => {
+                    failover_pending |= generation != 0;
+                    let phase = sentinel_discovery_phase(generation, failover_pending);
+                    let discovery = self.discover_plain_primary(sentinel, deadline).await;
                     let client = match discovery {
                         Ok(client) => client,
                         Err(error) => {
-                            let mut cache = self.sentinel_primary.lock().await;
-                            cache.invalidate(generation);
+                            record_sentinel_discovery(self.backend_name, phase, "failure");
+                            drop(lease);
                             let remaining = deadline.saturating_duration_since(Instant::now());
                             if remaining.is_zero() {
+                                record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
                                 return Err(error);
                             }
                             tokio::time::sleep(SENTINEL_RETRY_INTERVAL.min(remaining)).await;
                             continue;
                         },
                     };
-                    let mut cache = self.sentinel_primary.lock().await;
-                    if cache.publish(generation, client.clone()) != PublishResult::Accepted {
+                    if lease.publish(client.clone()) != PublishResult::Accepted {
+                        record_sentinel_discovery(self.backend_name, phase, "stale");
                         continue;
                     }
-                    drop(cache);
                     match self.open_primary_until(&client, deadline, connection_config).await {
                         Ok(connection) if self.generation.load(Ordering::Acquire) == generation => {
+                            record_sentinel_discovery(self.backend_name, phase, "success");
+                            if failover_pending {
+                                record_sentinel_failover(self.backend_name, "recovered");
+                            }
                             return Ok(connection);
                         },
                         Ok(_) | Err(_) => {
-                            let mut cache = self.sentinel_primary.lock().await;
-                            cache.invalidate(generation);
+                            failover_pending = true;
+                            let result = if self.generation.load(Ordering::Acquire) == generation {
+                                "failure"
+                            } else {
+                                "stale"
+                            };
+                            record_sentinel_discovery(self.backend_name, phase, result);
+                            if let Err(error) = self.invalidate_primary_until(generation, deadline).await {
+                                record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
+                                return Err(error);
+                            }
                         },
                     }
                 },
             }
             if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
                 return Err(BackendError::Unavailable("Sentinel discovery timeout".into()));
             }
         }
+    }
+
+    /// Discover a plain primary with a separate bound for each configured
+    /// Sentinel endpoint. The public redis-rs helper accepts no per-call
+    /// async connection config, so a one-endpoint client keeps a stalled
+    /// endpoint from consuming the entire convergence deadline.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one endpoint owns client construction, bounded probing, and error classification"
+    )]
+    async fn discover_plain_primary(
+        &self,
+        sentinel: &PlainSentinelConfig,
+        deadline: Instant,
+    ) -> Result<redis::Client, BackendError> {
+        let endpoint_timeout = self
+            .timeouts
+            .connect
+            .min(self.timeouts.operation)
+            .min(SENTINEL_ENDPOINT_TIMEOUT);
+        let mut last_error = None;
+        for endpoint in &sentinel.endpoints {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let timeout = endpoint_timeout.min(remaining);
+            let mut builder = SentinelClientBuilder::new(
+                std::iter::once(endpoint.clone()),
+                sentinel.service_name.as_str(),
+                SentinelServerType::Master,
+            )
+            .map_err(|error| BackendError::Unavailable(format!("Sentinel configuration: {error}")))?;
+            if let Some(value) = &sentinel.sentinel_username {
+                builder = builder.set_client_to_sentinel_username(value);
+            }
+            if let Some(value) = &sentinel.sentinel_password {
+                builder = builder.set_client_to_sentinel_password(value);
+            }
+            if let Some(value) = &sentinel.redis_username {
+                builder = builder.set_client_to_redis_username(value);
+            }
+            if let Some(value) = &sentinel.redis_password {
+                builder = builder.set_client_to_redis_password(value);
+            }
+            let mut client = builder
+                .build()
+                .map_err(|error| BackendError::Unavailable(format!("Sentinel configuration: {error}")))?;
+            match tokio::time::timeout(timeout, client.async_get_client()).await {
+                Ok(Ok(client)) => return Ok(client),
+                Ok(Err(error)) => last_error = Some(map_valkey_error("Sentinel discovery", &error)),
+                Err(_elapsed) => {
+                    last_error = Some(BackendError::Unavailable("Sentinel endpoint timeout".into()));
+                },
+            }
+        }
+        Err(last_error.unwrap_or_else(|| BackendError::Unavailable("Sentinel discovery timeout".into())))
     }
 
     /// Open a connection to a discovered primary without another Sentinel query.
@@ -705,56 +823,111 @@ impl ValkeyConnection {
         .map_err(|error| map_valkey_error("Sentinel primary", &error))
     }
 
+    /// Invalidate a discovered primary without extending the enclosing
+    /// connection deadline while waiting for the cache mutex.
+    async fn invalidate_primary_until(&self, generation: u64, deadline: Instant) -> Result<(), BackendError> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(BackendError::Unavailable("Sentinel primary cache lock timeout".into()));
+        }
+        let mut cache = tokio::time::timeout(remaining, self.sentinel_primary.lock())
+            .await
+            .map_err(|_elapsed| BackendError::Unavailable("Sentinel primary cache lock timeout".into()))?;
+        cache.invalidate(generation);
+        drop(cache);
+        Ok(())
+    }
+
     /// Discover a TLS primary with native redis-rs connections. This avoids
     /// redis-rs' internal async Sentinel reconnect path, which does not pass
     /// the caller's TLS configuration through its Sentinel probe.
     /// Open a TLS connection through a cached or newly discovered primary.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "bounded TLS discovery owns cache recovery and connection publication"
+    )]
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the discovery action owns a cancellation-resetting cache lease across the match"
+    )]
     async fn open_tls_sentinel(
         &self,
         sentinel: &TlsSentinelConfig,
         deadline: Instant,
         connection_config: &redis::AsyncConnectionConfig,
     ) -> Result<MultiplexedConnection, BackendError> {
+        let mut failover_pending = false;
         loop {
             let generation = self.generation.load(Ordering::Acquire);
             let action = {
                 let remaining = deadline.saturating_duration_since(Instant::now());
-                let mut cache = tokio::time::timeout(remaining, self.sentinel_primary.lock())
-                    .await
-                    .map_err(|_elapsed| BackendError::Unavailable("Sentinel primary cache lock timeout".into()))?;
-                primary_action(&mut cache, generation)
+                let cache = match tokio::time::timeout(remaining, Arc::clone(&self.sentinel_primary).lock_owned()).await
+                {
+                    Ok(cache) => cache,
+                    Err(_elapsed) => {
+                        record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
+                        return Err(BackendError::Unavailable("Sentinel primary cache lock timeout".into()));
+                    },
+                };
+                primary_action(cache, generation)
             };
             match action {
                 PrimaryAction::Hit(client) => match self.open_primary_until(&client, deadline, connection_config).await
                 {
-                    Ok(connection) if self.generation.load(Ordering::Acquire) == generation => return Ok(connection),
+                    Ok(connection) if self.generation.load(Ordering::Acquire) == generation => {
+                        if failover_pending {
+                            record_sentinel_failover(self.backend_name, "recovered");
+                        }
+                        return Ok(connection);
+                    },
                     Ok(_) | Err(_) => {
-                        let mut cache = self.sentinel_primary.lock().await;
-                        cache.invalidate(generation);
+                        failover_pending = true;
+                        if let Err(error) = self.invalidate_primary_until(generation, deadline).await {
+                            record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
+                            return Err(error);
+                        }
                     },
                 },
                 PrimaryAction::Wait => {
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
+                        record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
                         return Err(BackendError::Unavailable("Sentinel TLS discovery timeout".into()));
                     }
                     tokio::time::sleep(SENTINEL_RETRY_INTERVAL.min(remaining)).await;
                 },
-                PrimaryAction::Discover => {
-                    let (client, connection) = self.discover_tls_primary(sentinel, deadline, connection_config).await?;
-                    let mut cache = self.sentinel_primary.lock().await;
+                PrimaryAction::Discover(lease) => {
+                    failover_pending |= generation != 0;
+                    let phase = sentinel_discovery_phase(generation, failover_pending);
+                    let discovery = self.discover_tls_primary(sentinel, deadline, connection_config).await;
+                    let (client, connection) = match discovery {
+                        Ok(value) => value,
+                        Err(error) => {
+                            record_sentinel_discovery(self.backend_name, phase, "failure");
+                            drop(lease);
+                            if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                                record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
+                                return Err(error);
+                            }
+                            continue;
+                        },
+                    };
                     if self.generation.load(Ordering::Acquire) != generation
-                        || cache.publish(generation, client) != PublishResult::Accepted
+                        || lease.publish(client) != PublishResult::Accepted
                     {
-                        drop(cache);
+                        record_sentinel_discovery(self.backend_name, phase, "stale");
                         drop(connection);
                         continue;
                     }
-                    drop(cache);
+                    record_sentinel_discovery(self.backend_name, phase, "success");
+                    if failover_pending {
+                        record_sentinel_failover(self.backend_name, "recovered");
+                    }
                     return Ok(connection);
                 },
             }
             if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
                 return Err(BackendError::Unavailable("Sentinel TLS discovery timeout".into()));
             }
         }
@@ -863,18 +1036,102 @@ impl ValkeyConnection {
     }
 }
 
-enum PrimaryAction {
-    Hit(redis::Client),
-    Wait,
-    Discover,
+/// Classify discovery relative to the initial topology generation.
+fn sentinel_discovery_phase(generation: u64, recovery_pending: bool) -> &'static str {
+    if generation != 0 || recovery_pending {
+        "rediscovery"
+    } else {
+        "initial"
+    }
 }
 
-fn primary_action(cache: &mut PrimaryCache<redis::Client>, generation: u64) -> PrimaryAction {
+/// Record one bounded Sentinel discovery attempt.
+fn record_sentinel_discovery(backend: &'static str, phase: &'static str, result: &'static str) {
+    counter!(
+        METRIC_SENTINEL_DISCOVERY,
+        "backend" => backend,
+        "phase" => phase,
+        "result" => result,
+    )
+    .increment(1);
+}
+
+/// Record one generation-fenced Sentinel recovery outcome. `recovered` means
+/// a writable connection was returned after invalidation; it does not prove a
+/// Sentinel promotion occurred.
+fn record_sentinel_failover(backend: &'static str, outcome: &'static str) {
+    counter!(METRIC_SENTINEL_FAILOVER, "backend" => backend, "outcome" => outcome).increment(1);
+}
+
+/// Close one pending failover attempt with a bounded failure sample.
+fn record_failed_sentinel_failover(backend: &'static str, pending: &mut bool) {
+    if *pending {
+        record_sentinel_failover(backend, "failed");
+        *pending = false;
+    }
+}
+
+/// Next action for one generation-scoped primary lookup.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the cached redis-rs client remains directly owned for the hot cache-hit path"
+)]
+enum PrimaryAction {
+    /// Reuse the cached primary client.
+    Hit(redis::Client),
+    /// Wait for another task's discovery attempt.
+    Wait,
+    /// Own a cancellation-safe discovery lease.
+    Discover(DiscoveryLease),
+}
+
+/// Owned primary-cache mutex guard held by a discovery lease.
+type PrimaryCacheGuard = tokio::sync::OwnedMutexGuard<PrimaryCache<redis::Client>>;
+
+/// Owns the `Discovering` cache state while a Sentinel query is in flight.
+/// Its synchronous drop path clears that state even when the surrounding
+/// async task is cancelled, allowing a later request to retry discovery.
+struct DiscoveryLease {
+    /// Cache state that must be reset if discovery is cancelled.
+    cache: Option<PrimaryCacheGuard>,
+    /// Generation marked as discovering.
+    generation: u64,
+}
+
+impl DiscoveryLease {
+    /// Publish the discovered client and release the cache lock.
+    fn publish(mut self, primary: redis::Client) -> PublishResult {
+        let result = self.cache.as_mut().map_or(PublishResult::Discarded, |cache| {
+            cache.publish(self.generation, primary)
+        });
+        if result == PublishResult::Discarded
+            && let Some(cache) = self.cache.as_mut()
+        {
+            cache.invalidate(self.generation);
+        }
+        self.cache.take();
+        result
+    }
+}
+
+impl Drop for DiscoveryLease {
+    fn drop(&mut self) {
+        if let Some(cache) = self.cache.as_mut() {
+            cache.invalidate(self.generation);
+        }
+    }
+}
+
+/// Select a cache hit, coalesced wait, or owned discovery attempt.
+fn primary_action(mut cache: PrimaryCacheGuard, generation: u64) -> PrimaryAction {
     match cache.lookup(generation) {
         Lookup::Hit(client) => PrimaryAction::Hit(client.clone()),
         Lookup::InProgress => PrimaryAction::Wait,
         Lookup::Miss => match cache.begin_discovery(generation) {
-            DiscoveryStart::Started => PrimaryAction::Discover,
+            DiscoveryStart::Started => PrimaryAction::Discover(DiscoveryLease {
+                cache: Some(cache),
+                generation,
+            }),
             DiscoveryStart::InProgress => PrimaryAction::Wait,
         },
     }
@@ -1078,6 +1335,9 @@ mod tests {
         BackendError, MAX_IDLE_TRANSACTION_CONNECTIONS, VALKEY_TIMEOUT, ValkeyConnection, ValkeyTimeouts,
         command_error, map_valkey_error,
     };
+    use crate::token_rate_limit::config::{
+        BackendConfig, BackendKind, BackendOnFailure, BackendTopology, SentinelConfig,
+    };
 
     fn valkey_url() -> Option<String> {
         std::env::var("TOKEN_RATE_LIMIT_VALKEY_URL").ok()
@@ -1122,6 +1382,124 @@ mod tests {
             "valkey",
         );
         assert!(connection.is_ok(), "valkeys:// is a valid TLS Sentinel endpoint");
+    }
+
+    #[test]
+    fn expanded_tls_sentinel_endpoint_selects_the_tls_source() {
+        let backend = BackendConfig {
+            kind: BackendKind::Valkey,
+            topology: Some(BackendTopology::Sentinel(Box::new(SentinelConfig {
+                endpoints: vec!["${TOKEN_RATE_LIMIT_SENTINEL_ENDPOINT}".into()],
+                service_name: "mymaster".into(),
+                sentinel_username: None,
+                sentinel_password: None,
+                redis_username: None,
+                redis_password: None,
+                discovery_timeout: Duration::from_secs(2),
+            }))),
+            namespace: None,
+            on_failure: BackendOnFailure::Closed,
+            connect_timeout: VALKEY_TIMEOUT,
+            operation_timeout: VALKEY_TIMEOUT,
+        };
+        let connection = ValkeyConnection::from_backend_config_with(&backend, "valkey", |name| {
+            assert_eq!(name, "TOKEN_RATE_LIMIT_SENTINEL_ENDPOINT");
+            Ok("rediss://127.0.0.1:26379".into())
+        })
+        .expect("expanded TLS Sentinel endpoint should configure");
+        assert!(matches!(
+            connection.source.as_ref(),
+            super::ConnectionSource::SentinelTls { .. }
+        ));
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the test intentionally holds the discovery lease until task cancellation"
+    )]
+    async fn cancelling_a_discovery_lease_resets_the_primary_cache() {
+        let cache = Arc::new(tokio::sync::Mutex::new(super::PrimaryCache::<redis::Client>::new()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task_cache = Arc::clone(&cache);
+        let task = tokio::spawn(async move {
+            let action = super::primary_action(task_cache.lock_owned().await, 0);
+            assert!(matches!(action, super::PrimaryAction::Discover(_)));
+            started_tx.send(()).expect("test receiver should still be present");
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.expect("discovery should start");
+        task.abort();
+        drop(task.await);
+
+        let cache = cache.lock().await;
+        assert!(matches!(cache.lookup(0), super::Lookup::Miss));
+        drop(cache);
+    }
+
+    #[tokio::test]
+    async fn primary_cache_invalidation_respects_the_remaining_deadline() {
+        let connection = ValkeyConnection::sentinel(
+            vec!["redis://127.0.0.1:26379".into()],
+            "mymaster".into(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            ValkeyTimeouts::default(),
+            "valkey",
+        )
+        .expect("test Sentinel configuration should build");
+        let _cache = connection.sentinel_primary.lock().await;
+        let result = connection
+            .invalidate_primary_until(0, Instant::now() + Duration::from_millis(5))
+            .await;
+        assert!(matches!(
+            result,
+            Err(BackendError::Unavailable(message)) if message.contains("cache lock timeout")
+        ));
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one contract test verifies both Sentinel metric families and their labels"
+    )]
+    fn sentinel_telemetry_uses_only_bounded_labels() {
+        assert_eq!(super::sentinel_discovery_phase(0, false), "initial");
+        assert_eq!(super::sentinel_discovery_phase(0, true), "rediscovery");
+        assert_eq!(super::sentinel_discovery_phase(1, false), "rediscovery");
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            super::record_sentinel_discovery("valkey", "rediscovery", "success");
+            super::record_sentinel_failover("valkey", "recovered");
+        });
+        let snapshot = snapshotter.snapshot().into_vec();
+        let labels_for = |name: &str| {
+            snapshot
+                .iter()
+                .find(|(key, ..)| key.key().name() == name)
+                .map(|(key, ..)| {
+                    let mut labels = key
+                        .key()
+                        .labels()
+                        .map(|label| label.key().to_owned())
+                        .collect::<Vec<_>>();
+                    labels.sort();
+                    labels
+                })
+        };
+        assert_eq!(
+            labels_for(super::METRIC_SENTINEL_DISCOVERY),
+            Some(vec!["backend".into(), "phase".into(), "result".into()])
+        );
+        assert_eq!(
+            labels_for(super::METRIC_SENTINEL_FAILOVER),
+            Some(vec!["backend".into(), "outcome".into()])
+        );
     }
 
     #[test]

@@ -95,7 +95,9 @@ miss, or backend error before the rule reservation uses the same span with
 - `token_rate_limit.decision`: `admitted` (reservation made), `denied` (429,
   budget exhausted), `soft_over_quota` (soft mode forwarded over budget with
   annotation), `unauthenticated` (401, no trusted subject to key the budget
-  on), or `error` (503, the backend failed and the filter failed closed).
+  on), `error` (503, the backend failed and the filter failed closed),
+  `bypassed` (explicit fail-open before a mutation was dispatched), or
+  `unconfirmed` (explicit fail-open after a mutation may have been dispatched).
   Soft decisions align with `praxis_trl_requests_total{result=…}`.
 - `token_rate_limit.actual_cost`: provider-reported weighted usage, recorded
   when the response body ends. Absent when the decision was not `admitted`
@@ -115,3 +117,12 @@ authenticated subject, internal budget key, prompt, body, model, or other
 request-specific identity. Valkey reconciliation runs asynchronously after
 response processing; its success or failure is exposed through metrics and
 accounting logs rather than extending the span further.
+
+Sentinel transport lifecycle is also metrics-only, not additional request-span
+attributes. `praxis_trl_sentinel_discovery_total{backend,phase,result}` records
+bounded initial discovery and generation-fenced rediscovery outcomes;
+`praxis_trl_sentinel_failover_total{backend,outcome}` records proxy-side
+recovery after invalidation. Their labels are fixed vocabularies and contain no
+endpoint, service-name, credential, subject, or bucket-key values. A
+`recovered` failover sample means that the proxy obtained a writable
+connection; it is not evidence that Sentinel promoted a replica.

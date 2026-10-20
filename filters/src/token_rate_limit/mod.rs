@@ -3331,12 +3331,6 @@ fn expand_backend_url_with(
     lookup(name).map_err(|_error| "token_rate_limit: backend.url environment variable is not set".into())
 }
 
-/// Expand one `${ENV_VAR}` reference in a backend URL against the real
-/// process environment.
-fn expand_backend_url(url: &str) -> Result<String, FilterError> {
-    expand_backend_url_with(url, |name| std::env::var(name))
-}
-
 /// Parse a simple `<number><unit>` duration (`ms`, `s`, `m`, `h`) into
 /// milliseconds, as used by `window` and `reservation_timeout`.
 fn parse_duration_ms(value: &str) -> Result<u64, FilterError> {

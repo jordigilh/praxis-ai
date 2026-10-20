@@ -13,7 +13,7 @@ Mirrors the `rules:`/`match:` shape from the `00121_token-rate-limiting` proposa
 
 Assumes request identity has already been resolved upstream (this filter doesn't authenticate callers) -- a catch-all rule (no `match:`) reserves quota for every request that reaches it, including probes and health checks. Scope rules with explicit `match:` conditions, or place an identity/auth filter earlier in the pipeline. Tracked as follow-on integration work in `grid#101`.
 
-Observability is group-level by rule, never by user. Metrics carry only bounded `rule`, `algorithm`, `backend`, `error`, `result`, and `capacity` labels; accounting logs and optional OpenTelemetry spans likewise omit raw subject and bucket-key values. The Prometheus contract is:
+Observability is group-level by rule, never by user. Metrics carry only bounded `rule`, `algorithm`, `backend`, `error`, `result`, `capacity`, `phase`, and `outcome` labels; accounting logs and optional OpenTelemetry spans likewise omit raw subject and bucket-key values. The Prometheus contract is:
 
 - `praxis_trl_requests_total{rule,result}` (`admitted`, `denied`, or `soft_over_quota`): budget decisions only. Soft over-quota forwards are **not** reserved or reconciled (meter-only path does not debit the window). Requests rejected before a decision are counted by `praxis_trl_unauthenticated_total` (401, no trusted subject) and `praxis_trl_backend_errors_total` (503, fail closed) instead. Hierarchy decisions use the same metrics with `rule` set to `hierarchy:org`, `hierarchy:team`, or `hierarchy:user`. A configured rule must not use those names.
 
@@ -34,6 +34,10 @@ Accounting log field `outcome` on hard denials is one of: `budget_exhausted` (wi
 - `praxis_trl_soft_tier_activations_total{rule,capacity}`
 
 - `praxis_trl_backend_errors_total{rule,backend,error}`: failed reservations (the 503 path), failed reconciliation enqueues, and reconciliations abandoned after their retries. `error` is one of `unavailable`, `unconfirmed`, `invalid_response`, or `configuration_mismatch`.
+
+- `praxis_trl_sentinel_discovery_total{backend,phase,result}`: bounded Sentinel primary-discovery attempts. `phase` is `initial` or `rediscovery`; `result` is `success`, `failure`, or `stale` when generation fencing discards a result. This metric is emitted only for Sentinel topologies.
+
+- `praxis_trl_sentinel_failover_total{backend,outcome}`: generation-fenced recovery after a cached connection invalidation. `outcome` is `recovered` when a writable connection is returned or `failed` when the bounded discovery deadline is exhausted. `recovered` does not prove that Sentinel promoted a replica; it records proxy-side recovery only.
 
 - `praxis_trl_fail_open_admissions_total{rule,backend,outcome}`: explicit `backend.on_failure: open` admissions, with `outcome` equal to `bypassed` when no mutation was dispatched or `unconfirmed` when a dispatched operation may have committed. No reservation handle is created for either outcome.
 

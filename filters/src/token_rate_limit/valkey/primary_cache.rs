@@ -31,14 +31,27 @@ pub(crate) enum Lookup<'a, T> {
     InProgress,
 }
 
+/// Internal state for one generation-scoped primary cache.
 enum State<T> {
+    /// No primary or discovery attempt is retained.
     Empty,
-    Discovering { generation: u64 },
-    Ready { generation: u64, primary: T },
+    /// A discovery attempt owns this generation.
+    Discovering {
+        /// Generation being discovered.
+        generation: u64,
+    },
+    /// A primary is ready for this generation.
+    Ready {
+        /// Generation that produced the primary.
+        generation: u64,
+        /// Discovered primary client.
+        primary: T,
+    },
 }
 
 /// State machine for coalescing and fencing Sentinel primary discovery.
 pub(crate) struct PrimaryCache<T> {
+    /// Current cache state.
     state: State<T>,
 }
 

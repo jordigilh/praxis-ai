@@ -40,7 +40,8 @@ use serde::Deserialize;
 /// the pipeline. Tracked as follow-on integration work in `grid#101`.
 ///
 /// Observability is group-level by rule, never by user. Metrics carry only
-/// bounded `rule`, `algorithm`, `backend`, `error`, `result`, and `capacity` labels;
+/// bounded `rule`, `algorithm`, `backend`, `error`, `result`, `capacity`,
+/// `phase`, and `outcome` labels;
 /// accounting logs and optional OpenTelemetry spans likewise omit raw
 /// subject and bucket-key values. The Prometheus contract is:
 ///
@@ -71,6 +72,18 @@ use serde::Deserialize;
 /// - `praxis_trl_backend_errors_total{rule,backend,error}`: failed reservations (the 503 path), failed reconciliation
 ///   enqueues, and reconciliations abandoned after their retries. `error` is one of `unavailable`, `unconfirmed`,
 ///   `invalid_response`, or `configuration_mismatch`.
+///
+/// - `praxis_trl_sentinel_discovery_total{backend,phase,result}`: bounded
+///   Sentinel primary-discovery attempts. `phase` is `initial` or
+///   `rediscovery`; `result` is `success`, `failure`, or `stale` when
+///   generation fencing discards a result. This metric is emitted only for
+///   Sentinel topologies.
+///
+/// - `praxis_trl_sentinel_failover_total{backend,outcome}`: generation-fenced
+///   recovery after a cached connection invalidation. `outcome` is
+///   `recovered` when a writable connection is returned or `failed` when the
+///   bounded discovery deadline is exhausted. `recovered` does not prove that
+///   Sentinel promoted a replica; it records proxy-side recovery only.
 ///
 /// - `praxis_trl_fail_open_admissions_total{rule,backend,outcome}`: explicit `backend.on_failure: open` admissions,
 ///   with `outcome` equal to `bypassed` when no mutation was dispatched or `unconfirmed` when a dispatched operation
