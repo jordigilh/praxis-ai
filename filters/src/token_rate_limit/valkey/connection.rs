@@ -178,6 +178,8 @@ struct TlsSentinelConfig {
     service_name: String,
     /// Credentials used by discovered data nodes.
     data_settings: redis::RedisConnectionInfo,
+    /// Optional custom trust material used by deterministic TLS tests.
+    tls_certificates: Option<redis::TlsCertificates>,
 }
 
 /// Format a Sentinel-reported primary address as a Redis URL, preserving IPv6
@@ -381,6 +383,7 @@ impl ValkeyConnection {
                     endpoints,
                     service_name,
                     data_settings,
+                    tls_certificates: None,
                 }),
             }
         } else {
@@ -405,6 +408,24 @@ impl ValkeyConnection {
             timeouts,
             backend_name,
         })
+    }
+
+    #[cfg(test)]
+    /// Install test-only TLS trust material without changing production config.
+    fn install_test_tls_certificates(&mut self, certificates: redis::TlsCertificates) -> Result<(), BackendError> {
+        let Some(source) = Arc::get_mut(&mut self.source) else {
+            return Err(BackendError::Unavailable("test source is not uniquely owned".into()));
+        };
+        let ConnectionSource::SentinelTls { config } = source else {
+            return Err(BackendError::Unavailable("test source is not TLS Sentinel".into()));
+        };
+        let Some(config) = Arc::get_mut(config) else {
+            return Err(BackendError::Unavailable(
+                "test TLS config is not uniquely owned".into(),
+            ));
+        };
+        config.tls_certificates = Some(certificates);
+        Ok(())
     }
 
     /// Stable selector label for bounded telemetry.
@@ -963,10 +984,11 @@ impl ValkeyConnection {
                 if remaining.is_zero() {
                     return Err(BackendError::Unavailable("Sentinel TLS discovery timeout".into()));
                 }
-                let client = match redis::Client::open(endpoint.clone()) {
-                    Ok(client) => client,
-                    Err(error) => return Err(map_valkey_error("Sentinel TLS configuration", &error)),
-                };
+                let client = tls_client(
+                    endpoint.clone(),
+                    sentinel.tls_certificates.as_ref(),
+                    "Sentinel TLS configuration",
+                )?;
                 let mut sentinel_connection = match tokio::time::timeout(
                     remaining,
                     client.get_multiplexed_async_connection_with_config(connection_config),
@@ -1004,8 +1026,11 @@ impl ValkeyConnection {
                         tls_params: None,
                     })
                     .set_redis_settings(sentinel.data_settings.clone());
-                let data_client = redis::Client::open(data_info)
-                    .map_err(|error| map_valkey_error("TLS primary configuration", &error))?;
+                let data_client = tls_client(
+                    data_info,
+                    sentinel.tls_certificates.as_ref(),
+                    "TLS primary configuration",
+                )?;
                 let mut data_connection = match tokio::time::timeout(
                     deadline.saturating_duration_since(Instant::now()),
                     data_client.get_multiplexed_async_connection_with_config(connection_config),
@@ -1324,6 +1349,19 @@ fn map_valkey_error(phase: &'static str, error: &redis::RedisError) -> BackendEr
     BackendError::Unavailable(format!("Redis/Valkey {phase}: {error}"))
 }
 
+/// Build one secure TLS client, optionally using test-provided trust material.
+fn tls_client(
+    connection_info: redis::ConnectionInfo,
+    certificates: Option<&redis::TlsCertificates>,
+    phase: &'static str,
+) -> Result<redis::Client, BackendError> {
+    let client = match certificates {
+        Some(certificates) => redis::Client::build_with_tls(connection_info, certificates.clone()),
+        None => redis::Client::open(connection_info),
+    };
+    client.map_err(|error| map_valkey_error(phase, &error))
+}
+
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
@@ -1346,6 +1384,182 @@ mod tests {
 
     fn valkey_url() -> Option<String> {
         std::env::var("TOKEN_RATE_LIMIT_VALKEY_URL").ok()
+    }
+
+    #[derive(Clone, Copy)]
+    enum TlsServerRole {
+        Sentinel { primary_port: u16 },
+        Primary,
+    }
+
+    struct TlsRespServer {
+        port: u16,
+        shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for TlsRespServer {
+        fn drop(&mut self) {
+            let _ = self.shutdown.take().map(|sender| sender.send(()));
+            self.task.abort();
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "TLS test material builds a CA and server certificate chain"
+    )]
+    fn tls_test_material() -> (redis::TlsCertificates, Arc<rustls::ServerConfig>) {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, SanType};
+
+        praxis_tls::provider::install();
+        let ca_key = KeyPair::generate().expect("generate test CA key");
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("test CA params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).expect("self-sign test CA");
+        let issuer = Issuer::from_params(&ca_params, &ca_key);
+
+        let server_key = KeyPair::generate().expect("generate test server key");
+        let mut server_params = CertificateParams::new(vec!["localhost".to_owned()]).expect("test server params");
+        server_params
+            .subject_alt_names
+            .push(SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)));
+        let server_cert = server_params
+            .signed_by(&server_key, &issuer)
+            .expect("sign test server certificate");
+        let cert_pem = server_cert.pem();
+        let key_pem = server_key.serialize_pem();
+        let server_certs = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse test server certificate");
+        let server_key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
+            .expect("parse test server key")
+            .expect("test server key is present");
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(server_certs, server_key)
+            .expect("build test TLS server config");
+        let certificates = redis::TlsCertificates {
+            client_tls: None,
+            root_cert: Some(ca_cert.pem().into_bytes()),
+        };
+        (certificates, Arc::new(server_config))
+    }
+
+    async fn read_crlf_line<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Option<Vec<u8>> {
+        let mut line = Vec::new();
+        let mut byte = [0_u8; 1];
+        loop {
+            tokio::io::AsyncReadExt::read_exact(reader, &mut byte).await.ok()?;
+            line.push(byte[0]);
+            if line.ends_with(b"\r\n") {
+                line.truncate(line.len().saturating_sub(2));
+                return Some(line);
+            }
+            if line.len() > 4096 {
+                return None;
+            }
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "RESP test parser handles each bounded request field"
+    )]
+    async fn read_resp_command<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Option<Vec<Vec<u8>>> {
+        let mut prefix = [0_u8; 1];
+        tokio::io::AsyncReadExt::read_exact(reader, &mut prefix).await.ok()?;
+        if prefix[0] != b'*' {
+            return None;
+        }
+        let count = String::from_utf8(read_crlf_line(reader).await?)
+            .ok()?
+            .parse::<usize>()
+            .ok()?;
+        let mut command = Vec::with_capacity(count);
+        for _ in 0..count {
+            tokio::io::AsyncReadExt::read_exact(reader, &mut prefix).await.ok()?;
+            if prefix[0] != b'$' {
+                return None;
+            }
+            let length = String::from_utf8(read_crlf_line(reader).await?)
+                .ok()?
+                .parse::<usize>()
+                .ok()?;
+            let mut value = vec![0_u8; length];
+            tokio::io::AsyncReadExt::read_exact(reader, &mut value).await.ok()?;
+            let mut crlf = [0_u8; 2];
+            tokio::io::AsyncReadExt::read_exact(reader, &mut crlf).await.ok()?;
+            if crlf != *b"\r\n" {
+                return None;
+            }
+            command.push(value);
+        }
+        Some(command)
+    }
+
+    fn resp_bulk(value: &str) -> Vec<u8> {
+        format!("${}\r\n{}\r\n", value.len(), value).into_bytes()
+    }
+
+    fn resp_for(command: &[Vec<u8>], role: TlsServerRole) -> Vec<u8> {
+        let name = command
+            .first()
+            .map(|value| String::from_utf8_lossy(value).to_ascii_uppercase())
+            .unwrap_or_default();
+        match (role, name.as_str()) {
+            (TlsServerRole::Sentinel { primary_port }, "SENTINEL") => {
+                let mut response = b"*2\r\n".to_vec();
+                response.extend(resp_bulk("127.0.0.1"));
+                response.extend(resp_bulk(&primary_port.to_string()));
+                response
+            },
+            (TlsServerRole::Primary, "ROLE") => b"*3\r\n$6\r\nmaster\r\n:0\r\n*0\r\n".to_vec(),
+            (_, "PING") => b"+PONG\r\n".to_vec(),
+            _ => b"+OK\r\n".to_vec(),
+        }
+    }
+
+    async fn serve_tls_resp_connection(
+        mut stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+        role: TlsServerRole,
+    ) {
+        while let Some(command) = read_resp_command(&mut stream).await {
+            let response = resp_for(&command, role);
+            if tokio::io::AsyncWriteExt::write_all(&mut stream, &response)
+                .await
+                .is_err()
+            {
+                return;
+            }
+            drop(tokio::io::AsyncWriteExt::flush(&mut stream).await);
+        }
+    }
+
+    fn start_tls_resp_server(server_config: Arc<rustls::ServerConfig>, role: TlsServerRole) -> TlsRespServer {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind TLS test server");
+        let port = listener.local_addr().expect("TLS test server address").port();
+        listener.set_nonblocking(true).expect("set TLS listener nonblocking");
+        let listener = tokio::net::TcpListener::from_std(listener).expect("adopt TLS listener");
+        let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
+        let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => {
+                        let Ok((stream, _peer)) = accepted else { break };
+                        let Ok(stream) = acceptor.accept(stream).await else { continue };
+                        serve_tls_resp_connection(stream, role).await;
+                    },
+                }
+            }
+        });
+        TlsRespServer {
+            port,
+            shutdown: Some(shutdown),
+            task,
+        }
     }
 
     #[tokio::test]
@@ -1387,6 +1601,112 @@ mod tests {
             "valkey",
         );
         assert!(connection.is_ok(), "valkeys:// is a valid TLS Sentinel endpoint");
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "secure TLS discovery test covers Sentinel, primary ROLE, and command traffic"
+    )]
+    async fn secure_tls_sentinel_discovers_and_uses_a_verified_primary() {
+        let (certificates, server_config) = tls_test_material();
+        let primary = start_tls_resp_server(Arc::clone(&server_config), TlsServerRole::Primary);
+        let sentinel = start_tls_resp_server(
+            server_config,
+            TlsServerRole::Sentinel {
+                primary_port: primary.port,
+            },
+        );
+        let mut connection = ValkeyConnection::sentinel(
+            vec![format!("rediss://localhost:{}", sentinel.port)],
+            "mymaster".into(),
+            None,
+            None,
+            None,
+            None,
+            true,
+            ValkeyTimeouts {
+                connect: Duration::from_secs(1),
+                operation: Duration::from_secs(1),
+                discovery: Duration::from_secs(2),
+            },
+            "valkey",
+        )
+        .expect("secure TLS Sentinel configuration should build");
+        connection
+            .install_test_tls_certificates(certificates)
+            .expect("install test trust material");
+
+        let mut pipe = redis::pipe();
+        pipe.cmd("PING");
+        let result: Result<(String,), BackendError> = connection.pipeline(&pipe).await;
+        assert_eq!(result.expect("secure TLS Sentinel request should succeed").0, "PONG");
+    }
+
+    #[tokio::test]
+    async fn secure_tls_sentinel_fails_closed_when_endpoint_is_unavailable() {
+        let connection = ValkeyConnection::sentinel(
+            vec!["rediss://127.0.0.1:1".into()],
+            "mymaster".into(),
+            None,
+            None,
+            None,
+            None,
+            true,
+            ValkeyTimeouts {
+                connect: Duration::from_millis(20),
+                operation: Duration::from_millis(20),
+                discovery: Duration::from_millis(30),
+            },
+            "valkey",
+        )
+        .expect("secure TLS Sentinel configuration should build");
+        let mut pipe = redis::pipe();
+        pipe.cmd("PING");
+        let result: Result<(String,), BackendError> = connection.pipeline(&pipe).await;
+        assert!(result.is_err(), "unavailable secure TLS Sentinel must fail closed");
+        assert!(connection.connection.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "certificate rejection test owns two independent TLS authorities and server guards"
+    )]
+    async fn secure_tls_sentinel_rejects_an_untrusted_root() {
+        let (_trusted_by_server, server_config) = tls_test_material();
+        let (wrong_root, _) = tls_test_material();
+        let primary = start_tls_resp_server(Arc::clone(&server_config), TlsServerRole::Primary);
+        let sentinel = start_tls_resp_server(
+            server_config,
+            TlsServerRole::Sentinel {
+                primary_port: primary.port,
+            },
+        );
+        let mut connection = ValkeyConnection::sentinel(
+            vec![format!("rediss://localhost:{}", sentinel.port)],
+            "mymaster".into(),
+            None,
+            None,
+            None,
+            None,
+            true,
+            ValkeyTimeouts {
+                connect: Duration::from_millis(100),
+                operation: Duration::from_millis(100),
+                discovery: Duration::from_millis(200),
+            },
+            "valkey",
+        )
+        .expect("secure TLS Sentinel configuration should build");
+        connection
+            .install_test_tls_certificates(wrong_root)
+            .expect("install wrong test trust material");
+        let mut pipe = redis::pipe();
+        pipe.cmd("PING");
+        let result: Result<(String,), BackendError> = connection.pipeline(&pipe).await;
+        assert!(result.is_err(), "an untrusted root must fail secure TLS discovery");
+        assert!(connection.connection.lock().unwrap().is_none());
     }
 
     #[test]
