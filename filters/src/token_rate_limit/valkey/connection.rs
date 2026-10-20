@@ -1441,9 +1441,8 @@ mod tests {
             "SENTINEL_PLAIN_ENDPOINT" => Ok("redis://127.0.0.1:26380".into()),
             _ => panic!("unexpected environment variable: {name}"),
         });
-        let error = match result {
-            Ok(_) => panic!("mixed expanded Sentinel schemes must fail"),
-            Err(error) => error,
+        let Err(error) = result else {
+            panic!("mixed expanded Sentinel schemes must fail")
         };
         assert!(error.to_string().contains("scheme must use TLS"), "got: {error}");
     }
