@@ -492,8 +492,7 @@ impl ValkeyConnection {
         loop {
             let opening_generation = self.generation.load(Ordering::Acquire);
             let connection = self.open_until(deadline).await?;
-            let generation = self.generation.load(Ordering::Acquire);
-            if generation == opening_generation {
+            if self.generation.load(Ordering::Acquire) == opening_generation {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 let mut cached = tokio::time::timeout(remaining, self.connection.lock())
                     .await
@@ -505,13 +504,13 @@ impl ValkeyConnection {
                     drop(connection);
                     return Ok((entry.connection.clone(), entry.generation));
                 }
-                if current_generation == generation {
+                if current_generation == opening_generation {
                     *cached = Some(CachedConnection {
                         connection: connection.clone(),
-                        generation,
+                        generation: opening_generation,
                     });
                     drop(cached);
-                    return Ok((connection, generation));
+                    return Ok((connection, opening_generation));
                 }
                 drop(cached);
                 drop(connection);
