@@ -389,11 +389,14 @@ impl ValkeyConnection {
     /// next operation performs fresh native discovery; no failed mutation is
     /// replayed here.
     async fn invalidate(&self, generation: u64) {
-        self.sentinel_primary.lock().await.take();
         let mut cached = self.connection.lock().await;
         if cached.as_ref().is_some_and(|entry| entry.generation == generation) {
             *cached = None;
             drop(cached);
+            let mut primary = self.sentinel_primary.lock().await;
+            if primary.as_ref().is_some_and(|entry| entry.generation == generation) {
+                *primary = None;
+            }
             self.generation
                 .fetch_max(generation.saturating_add(1), Ordering::AcqRel);
             self.transactions.generation.fetch_add(1, Ordering::AcqRel);
@@ -465,8 +468,20 @@ impl ValkeyConnection {
             }
             *cached = None;
         }
-        let connection = self.open_until(deadline).await?;
-        let generation = self.generation.load(Ordering::Acquire);
+        let (connection, generation) = loop {
+            let opening_generation = self.generation.load(Ordering::Acquire);
+            let connection = self.open_until(deadline).await?;
+            let generation = self.generation.load(Ordering::Acquire);
+            if generation == opening_generation {
+                break (connection, generation);
+            }
+            drop(connection);
+            if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                return Err(BackendError::Unavailable(
+                    "backend connection generation changed during open".into(),
+                ));
+            }
+        };
         *cached = Some(CachedConnection {
             connection: connection.clone(),
             generation,
