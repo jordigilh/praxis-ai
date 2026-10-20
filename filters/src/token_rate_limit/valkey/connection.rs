@@ -389,18 +389,23 @@ impl ValkeyConnection {
     /// next operation performs fresh native discovery; no failed mutation is
     /// replayed here.
     async fn invalidate(&self, generation: u64) {
-        let mut cached = self.connection.lock().await;
+        let Ok(mut cached) = tokio::time::timeout(self.timeouts.operation, self.connection.lock()).await else {
+            return;
+        };
         if cached.as_ref().is_some_and(|entry| entry.generation == generation) {
             *cached = None;
             drop(cached);
-            let mut primary = self.sentinel_primary.lock().await;
-            if primary.as_ref().is_some_and(|entry| entry.generation == generation) {
+            if let Ok(mut primary) = tokio::time::timeout(self.timeouts.operation, self.sentinel_primary.lock()).await
+                && primary.as_ref().is_some_and(|entry| entry.generation == generation)
+            {
                 *primary = None;
             }
             self.generation
                 .fetch_max(generation.saturating_add(1), Ordering::AcqRel);
             self.transactions.generation.fetch_add(1, Ordering::AcqRel);
-            self.transactions.idle.lock().await.clear();
+            if let Ok(mut idle) = tokio::time::timeout(self.timeouts.operation, self.transactions.idle.lock()).await {
+                idle.clear();
+            }
         }
     }
 
@@ -468,36 +473,53 @@ impl ValkeyConnection {
             ConnectionSource::Sentinel { .. } | ConnectionSource::SentinelTls { .. } => self.timeouts.discovery,
         };
         let deadline = Instant::now() + lock_timeout;
-        let mut cached = tokio::time::timeout(lock_timeout, self.connection.lock())
-            .await
-            .map_err(|_elapsed| BackendError::Unavailable("shared connection lock timeout".into()))?;
-        let current_generation = self.generation.load(Ordering::Acquire);
-        if let Some(entry) = cached.as_ref() {
-            if entry.generation == current_generation {
+        {
+            let cached = tokio::time::timeout(lock_timeout, self.connection.lock())
+                .await
+                .map_err(|_elapsed| BackendError::Unavailable("shared connection lock timeout".into()))?;
+            let current_generation = self.generation.load(Ordering::Acquire);
+            if let Some(entry) = cached.as_ref()
+                && entry.generation == current_generation
+            {
                 return Ok((entry.connection.clone(), entry.generation));
             }
-            *cached = None;
         }
-        let (connection, generation) = loop {
+
+        loop {
             let opening_generation = self.generation.load(Ordering::Acquire);
             let connection = self.open_until(deadline).await?;
             let generation = self.generation.load(Ordering::Acquire);
             if generation == opening_generation {
-                break (connection, generation);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let mut cached = tokio::time::timeout(remaining, self.connection.lock())
+                    .await
+                    .map_err(|_elapsed| BackendError::Unavailable("shared connection lock timeout".into()))?;
+                let current_generation = self.generation.load(Ordering::Acquire);
+                if let Some(entry) = cached.as_ref()
+                    && entry.generation == current_generation
+                {
+                    drop(connection);
+                    return Ok((entry.connection.clone(), entry.generation));
+                }
+                if current_generation == generation {
+                    *cached = Some(CachedConnection {
+                        connection: connection.clone(),
+                        generation,
+                    });
+                    drop(cached);
+                    return Ok((connection, generation));
+                }
+                drop(cached);
+                drop(connection);
+            } else {
+                drop(connection);
             }
-            drop(connection);
             if deadline.saturating_duration_since(Instant::now()).is_zero() {
                 return Err(BackendError::Unavailable(
                     "backend connection generation changed during open".into(),
                 ));
             }
-        };
-        *cached = Some(CachedConnection {
-            connection: connection.clone(),
-            generation,
-        });
-        drop(cached);
-        Ok((connection, generation))
+        }
     }
 
     /// Open a fresh connection, bounding both the connect attempt and
@@ -580,13 +602,25 @@ impl ValkeyConnection {
             let mut sentinel = tokio::time::timeout(remaining, sentinel.lock())
                 .await
                 .map_err(|_elapsed| BackendError::Unavailable("Sentinel discovery lock timeout".into()))?;
-            let client = tokio::time::timeout(
+            let client = match tokio::time::timeout(
                 deadline.saturating_duration_since(Instant::now()),
                 sentinel.async_get_client(),
             )
             .await
-            .map_err(|_elapsed| BackendError::Unavailable("Sentinel discovery timeout".into()))?
-            .map_err(|error| map_valkey_error("Sentinel discovery", &error))?;
+            {
+                Ok(Ok(client)) => client,
+                Ok(Err(_error)) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(BackendError::Unavailable("Sentinel discovery timeout".into()));
+                    }
+                    tokio::time::sleep(SENTINEL_RETRY_INTERVAL.min(remaining)).await;
+                    continue;
+                },
+                Err(_elapsed) => {
+                    return Err(BackendError::Unavailable("Sentinel discovery timeout".into()));
+                },
+            };
             drop(sentinel);
 
             if self.generation.load(Ordering::Acquire) != discovery_generation {
@@ -605,7 +639,11 @@ impl ValkeyConnection {
                 Err(error) => {
                     *primary = None;
                     if self.generation.load(Ordering::Acquire) == discovery_generation {
-                        return Err(error);
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            return Err(error);
+                        }
+                        tokio::time::sleep(SENTINEL_RETRY_INTERVAL.min(remaining)).await;
                     }
                 },
             }
