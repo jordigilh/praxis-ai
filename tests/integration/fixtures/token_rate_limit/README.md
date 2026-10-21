@@ -35,8 +35,16 @@ Readiness snapshots the primary replication offset and waits for an attached
 replica to acknowledge at least that offset. The two observed offsets need not
 be equal: Sentinel traffic may advance the log between INFO calls.
 
-CI also runs the existing standalone state, reconciliation, and cross-gateway
-identity/quota contracts against each pinned product. The fixture invokes
+PR CI runs credential-free smoke against official Redis and an immutable
+upstream Valkey image. Upstream Valkey results are **not** Red Hat image
+qualification. The exact Red Hat Valkey release target above must also pass the
+complete suite in an authorized environment, with its reviewed source SHA,
+image digest, server version, and results recorded separately. This preserves
+equal backend support without exposing registry credentials to fork PR code;
+credentialed Red Hat CI automation remains a follow-up.
+
+The smoke lane also runs the existing standalone state, reconciliation, and
+cross-gateway identity/quota contracts. The fixture invokes
 `run-standalone-contracts.sh`, which requires Python 3 to encode the ephemeral
 data credentials and selects the existing Valkey-named contract targets for
 either wire-compatible product. Its proxy binary includes `basic-auth-filter`
