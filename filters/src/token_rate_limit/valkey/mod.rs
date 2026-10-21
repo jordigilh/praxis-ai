@@ -340,7 +340,8 @@ async fn read_accounting_marker(
     let mut marker_read = redis::pipe();
     marker_read.cmd("GET").arg(&generation);
     marker_read.cmd("GET").arg(marker);
-    let (generation_stored, stored): (Option<String>, Option<String>) = Box::pin(valkey.pipeline(&marker_read)).await?;
+    let (generation_stored, stored): (Option<String>, Option<String>) =
+        Box::pin(valkey.read_pipeline(&marker_read)).await?;
     match generation_stored.as_deref() {
         Some(ACCOUNTING_GENERATION_VALUE) => Ok(stored),
         Some(_) => Err(BackendError::ConfigurationMismatch),
@@ -373,7 +374,7 @@ async fn ensure_accounting_generation(valkey: &ValkeyConnection, namespace: &str
     let generation = accounting_generation_key(namespace);
     let mut read = redis::pipe();
     read.cmd("GET").arg(&generation);
-    let (stored,): (Option<String>,) = Box::pin(valkey.pipeline(&read)).await?;
+    let (stored,): (Option<String>,) = Box::pin(valkey.read_pipeline(&read)).await?;
     if let Some(stored) = stored {
         return (stored == ACCOUNTING_GENERATION_VALUE)
             .then_some(())
@@ -432,7 +433,7 @@ async fn scan_namespace_state(valkey: &ValkeyConnection, namespace: &str) -> Res
             .arg(&pattern)
             .arg("COUNT")
             .arg(BOOTSTRAP_SCAN_COUNT);
-        let (reply,): (redis::Value,) = Box::pin(valkey.pipeline(&scan)).await?;
+        let (reply,): (redis::Value,) = Box::pin(valkey.read_pipeline(&scan)).await?;
         let (next, keys): (u64, Vec<Vec<u8>>) =
             redis::from_redis_value(reply).map_err(|_error| BackendError::InvalidResponse)?;
         scanned_keys = scanned_keys.saturating_add(keys.len());
@@ -508,7 +509,7 @@ async fn ensure_accounting_config_attempt(
     let reply: redis::Value = read
         .query_async(connection)
         .await
-        .map_err(|error| valkey.transaction_command_error(&error))?;
+        .map_err(|error| valkey.transaction_read_error(&error))?;
     let (stored, state_exists): (Option<String>, i64) =
         redis::from_redis_value(reply).map_err(|_error| BackendError::InvalidResponse)?;
 
@@ -547,6 +548,11 @@ mod primary_cache;
 mod sliding_window;
 mod token_bucket;
 mod window;
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(clippy::expect_used, clippy::panic, reason = "test fixture assertions")]
+mod test_resp;
 
 use connection::{AbortRetry, unwatch};
 pub(super) use connection::{VALKEY_TIMEOUT, ValkeyConnection};

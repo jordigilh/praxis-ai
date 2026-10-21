@@ -515,7 +515,7 @@ impl ValkeySlidingWindowBackend {
         let (value,): (Option<String>,) = read
             .query_async(connection)
             .await
-            .map_err(|error| self.valkey.transaction_command_error(&error))?;
+            .map_err(|error| self.valkey.transaction_read_error(&error))?;
         Ok(value)
     }
 

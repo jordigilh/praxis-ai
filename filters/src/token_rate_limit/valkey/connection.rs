@@ -5,11 +5,6 @@
 //! multiplexed connection for pipelines, and a small pool of dedicated
 //! connections for `WATCH` transactions, which are per-connection state.
 
-#![expect(
-    clippy::large_futures,
-    reason = "bounded Valkey connection futures compose the transport state machine and deadline guards"
-)]
-
 use std::{
     sync::{
         Arc, Mutex, RwLock,
@@ -447,18 +442,37 @@ impl ValkeyConnection {
     ///
     /// # Errors
     ///
-    /// Returns [`BackendError::Unavailable`] on connection or command errors,
-    /// including the [`VALKEY_TIMEOUT`] enforced by the client.
+    /// Returns [`BackendError::Unavailable`] before dispatch, or
+    /// [`BackendError::Unconfirmed`] when a dispatched mutation's reply fails.
     pub(in crate::token_rate_limit) async fn pipeline<T: redis::FromRedisValue>(
         &self,
         pipe: &redis::Pipeline,
+    ) -> Result<T, BackendError> {
+        self.pipeline_with_error(pipe, command_error).await
+    }
+
+    /// Run a pipeline containing only reads. A failed reply is retryable because
+    /// no accounting mutation was dispatched; never use this for writes.
+    pub(super) async fn read_pipeline<T: redis::FromRedisValue>(
+        &self,
+        pipe: &redis::Pipeline,
+    ) -> Result<T, BackendError> {
+        self.pipeline_with_error(pipe, |error| map_valkey_error("read", error))
+            .await
+    }
+
+    /// Share connection fencing without conflating read and mutation failures.
+    async fn pipeline_with_error<T: redis::FromRedisValue>(
+        &self,
+        pipe: &redis::Pipeline,
+        classify: impl FnOnce(&redis::RedisError) -> BackendError,
     ) -> Result<T, BackendError> {
         let (mut connection, generation) = self.shared().await?;
         match pipe.query_async::<T>(&mut connection).await {
             Ok(value) => Ok(value),
             Err(error) => {
                 self.invalidate(generation, advances_topology_generation(&error)).await;
-                Err(command_error(&error))
+                Err(classify(&error))
             },
         }
     }
@@ -466,11 +480,23 @@ impl ValkeyConnection {
     /// Map a command error from a dedicated transaction while preserving
     /// topology-changing replies for the next Sentinel checkout.
     pub(super) fn transaction_command_error(&self, error: &redis::RedisError) -> BackendError {
+        self.fence_transaction_error(error);
+        command_error(error)
+    }
+
+    /// A WATCH/read phase has not dispatched an accounting mutation. Its socket
+    /// is discarded by the caller, so retrying the read on a fresh one is safe.
+    pub(super) fn transaction_read_error(&self, error: &redis::RedisError) -> BackendError {
+        self.fence_transaction_error(error);
+        map_valkey_error("transaction read", error)
+    }
+
+    /// Preserve topology fencing for both read and mutation transaction phases.
+    fn fence_transaction_error(&self, error: &redis::RedisError) {
         if advances_topology_generation(error) {
             self.topology_generation.fetch_add(1, Ordering::AcqRel);
             self.fence_shared_connection();
         }
-        command_error(error)
     }
 
     /// Fence shared and pooled sockets after a topology-changing transaction
@@ -680,17 +706,20 @@ impl ValkeyConnection {
             .set_connection_timeout(Some(self.timeouts.connect.min(remaining)))
             .set_response_timeout(Some(self.timeouts.operation));
         match self.source.as_ref() {
-            ConnectionSource::Standalone(client) => {
-                tokio::time::timeout(remaining, client.get_multiplexed_async_connection_with_config(&config))
-                    .await
-                    .map_err(|_elapsed| BackendError::Unavailable("backend connection deadline elapsed".into()))?
-                    .map_err(|error| map_valkey_error("connection", &error))
-            },
+            ConnectionSource::Standalone(client) => tokio::time::timeout(
+                remaining,
+                Box::pin(client.get_multiplexed_async_connection_with_config(&config)),
+            )
+            .await
+            .map_err(|_elapsed| BackendError::Unavailable("backend connection deadline elapsed".into()))?
+            .map_err(|error| map_valkey_error("connection", &error)),
             ConnectionSource::Sentinel { config: sentinel } => {
-                self.open_sentinel_until(sentinel, deadline, &config).await
+                // Discovery is a cold path. Keep its transport state off the
+                // stack without allocating on healthy shared/pool cache hits.
+                Box::pin(self.open_sentinel_until(sentinel, deadline, &config)).await
             },
             ConnectionSource::SentinelTls { config: sentinel } => {
-                self.open_tls_sentinel(sentinel, deadline, &config).await
+                Box::pin(self.open_tls_sentinel(sentinel, deadline, &config)).await
             },
         }
     }
@@ -727,21 +756,22 @@ impl ValkeyConnection {
                 primary_action(cache, generation)
             };
             match action {
-                PrimaryAction::Hit(client) => match self.open_primary_until(&client, deadline, connection_config).await
-                {
-                    Ok(connection) if self.topology_generation.load(Ordering::Acquire) == generation => {
-                        if failover_pending {
-                            record_sentinel_failover(self.backend_name, "recovered");
-                        }
-                        return Ok(connection);
-                    },
-                    Ok(_) | Err(_) => {
-                        failover_pending = true;
-                        if let Err(error) = self.invalidate_primary_until(generation, deadline).await {
-                            record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
-                            return Err(error);
-                        }
-                    },
+                PrimaryAction::Hit(client) => {
+                    match Box::pin(self.open_primary_until(&client, deadline, connection_config)).await {
+                        Ok(connection) if self.topology_generation.load(Ordering::Acquire) == generation => {
+                            if failover_pending {
+                                record_sentinel_failover(self.backend_name, "recovered");
+                            }
+                            return Ok(connection);
+                        },
+                        Ok(_) | Err(_) => {
+                            failover_pending = true;
+                            if let Err(error) = self.invalidate_primary_until(generation, deadline).await {
+                                record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
+                                return Err(error);
+                            }
+                        },
+                    }
                 },
                 PrimaryAction::Wait => {
                     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -754,7 +784,7 @@ impl ValkeyConnection {
                 PrimaryAction::Discover(lease) => {
                     failover_pending |= generation != 0;
                     let phase = sentinel_discovery_phase(generation, failover_pending);
-                    let discovery = self.discover_plain_primary(sentinel, deadline).await;
+                    let discovery = Box::pin(self.discover_plain_primary(sentinel, deadline)).await;
                     let client = match discovery {
                         Ok(client) => client,
                         Err(error) => {
@@ -773,7 +803,7 @@ impl ValkeyConnection {
                         record_sentinel_discovery(self.backend_name, phase, "stale");
                         continue;
                     }
-                    match self.open_primary_until(&client, deadline, connection_config).await {
+                    match Box::pin(self.open_primary_until(&client, deadline, connection_config)).await {
                         Ok(connection) if self.topology_generation.load(Ordering::Acquire) == generation => {
                             record_sentinel_discovery(self.backend_name, phase, "success");
                             if failover_pending {
@@ -845,7 +875,9 @@ impl ValkeyConnection {
             let mut client = builder
                 .build()
                 .map_err(|error| BackendError::Unavailable(format!("Sentinel configuration: {error}")))?;
-            match tokio::time::timeout(timeout, client.async_get_client()).await {
+            // redis-rs composes Sentinel and primary probes in this large
+            // future; box only this discovery attempt, not request payloads.
+            match tokio::time::timeout(timeout, Box::pin(client.async_get_client())).await {
                 Ok(Ok(client)) => return Ok(client),
                 Ok(Err(error)) => last_error = Some(map_valkey_error("Sentinel discovery", &error)),
                 Err(_elapsed) => {
@@ -925,21 +957,22 @@ impl ValkeyConnection {
                 primary_action(cache, generation)
             };
             match action {
-                PrimaryAction::Hit(client) => match self.open_primary_until(&client, deadline, connection_config).await
-                {
-                    Ok(connection) if self.topology_generation.load(Ordering::Acquire) == generation => {
-                        if failover_pending {
-                            record_sentinel_failover(self.backend_name, "recovered");
-                        }
-                        return Ok(connection);
-                    },
-                    Ok(_) | Err(_) => {
-                        failover_pending = true;
-                        if let Err(error) = self.invalidate_primary_until(generation, deadline).await {
-                            record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
-                            return Err(error);
-                        }
-                    },
+                PrimaryAction::Hit(client) => {
+                    match Box::pin(self.open_primary_until(&client, deadline, connection_config)).await {
+                        Ok(connection) if self.topology_generation.load(Ordering::Acquire) == generation => {
+                            if failover_pending {
+                                record_sentinel_failover(self.backend_name, "recovered");
+                            }
+                            return Ok(connection);
+                        },
+                        Ok(_) | Err(_) => {
+                            failover_pending = true;
+                            if let Err(error) = self.invalidate_primary_until(generation, deadline).await {
+                                record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
+                                return Err(error);
+                            }
+                        },
+                    }
                 },
                 PrimaryAction::Wait => {
                     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -952,7 +985,7 @@ impl ValkeyConnection {
                 PrimaryAction::Discover(lease) => {
                     failover_pending |= generation != 0;
                     let phase = sentinel_discovery_phase(generation, failover_pending);
-                    let discovery = self.discover_tls_primary(sentinel, deadline, connection_config).await;
+                    let discovery = Box::pin(self.discover_tls_primary(sentinel, deadline, connection_config)).await;
                     let (client, connection) = match discovery {
                         Ok(value) => value,
                         Err(error) => {
@@ -1005,23 +1038,24 @@ impl ValkeyConnection {
                 if remaining.is_zero() {
                     return Err(BackendError::Unavailable("Sentinel TLS discovery timeout".into()));
                 }
+                let endpoint_deadline = Instant::now() + sentinel_endpoint_timeout(self.timeouts, remaining);
                 let client = tls_client(
                     endpoint.clone(),
                     sentinel.tls_certificates.as_ref(),
                     "Sentinel TLS configuration",
                 )?;
                 let mut sentinel_connection = match tokio::time::timeout(
-                    remaining,
-                    client.get_multiplexed_async_connection_with_config(connection_config),
+                    endpoint_deadline.saturating_duration_since(Instant::now()),
+                    Box::pin(client.get_multiplexed_async_connection_with_config(connection_config)),
                 )
                 .await
                 {
                     Ok(Ok(connection)) => connection,
                     Ok(Err(_error)) => continue,
-                    Err(_elapsed) => break,
+                    Err(_elapsed) => continue,
                 };
                 let address: (String, u16) = match tokio::time::timeout(
-                    deadline.saturating_duration_since(Instant::now()),
+                    endpoint_deadline.saturating_duration_since(Instant::now()),
                     redis::cmd("SENTINEL")
                         .arg("get-master-addr-by-name")
                         .arg(&sentinel.service_name)
@@ -1037,7 +1071,7 @@ impl ValkeyConnection {
                 let base = match redis::IntoConnectionInfo::into_connection_info(primary_url(&primary_host, address.1))
                 {
                     Ok(info) => info,
-                    Err(error) => return Err(map_valkey_error("Sentinel primary address", &error)),
+                    Err(_error) => continue,
                 };
                 let data_info = base
                     .set_addr(redis::ConnectionAddr::TcpTls {
@@ -1053,8 +1087,8 @@ impl ValkeyConnection {
                     "TLS primary configuration",
                 )?;
                 let mut data_connection = match tokio::time::timeout(
-                    deadline.saturating_duration_since(Instant::now()),
-                    data_client.get_multiplexed_async_connection_with_config(connection_config),
+                    endpoint_deadline.saturating_duration_since(Instant::now()),
+                    Box::pin(data_client.get_multiplexed_async_connection_with_config(connection_config)),
                 )
                 .await
                 {
@@ -1063,7 +1097,7 @@ impl ValkeyConnection {
                     Err(_elapsed) => continue,
                 };
                 let role: redis::Role = match tokio::time::timeout(
-                    deadline.saturating_duration_since(Instant::now()),
+                    endpoint_deadline.saturating_duration_since(Instant::now()),
                     redis::cmd("ROLE").query_async(&mut data_connection),
                 )
                 .await
@@ -1330,11 +1364,13 @@ impl Drop for TransactionConnection {
 }
 
 /// Clear a watch before returning a connection without executing a transaction.
+/// `UNWATCH` changes only connection state, so failed pre-mutation cleanup is
+/// retryable. Callers discard the socket rather than pooling its watch state.
 pub(super) async fn unwatch(connection: &mut MultiplexedConnection) -> Result<(), BackendError> {
     redis::cmd("UNWATCH")
         .exec_async(connection)
         .await
-        .map_err(|error| command_error(&error))
+        .map_err(|error| map_valkey_error("UNWATCH", &error))
 }
 
 /// Retry aborted optimistic transactions within the Valkey deadline.
@@ -1400,7 +1436,7 @@ fn tls_client(
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
-mod tests {
+pub(super) mod tests {
     use std::{
         sync::{
             Arc,
@@ -1426,6 +1462,7 @@ mod tests {
         Sentinel { primary_port: u16 },
         SentinelBadAddress,
         SentinelError,
+        DropReads,
         Primary,
         PrimaryError,
         PrimaryReplica,
@@ -1504,7 +1541,10 @@ mod tests {
         clippy::too_many_lines,
         reason = "RESP test parser handles each bounded request field"
     )]
-    async fn read_resp_command<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Option<Vec<Vec<u8>>> {
+    /// Read one RESP request from a controlled loopback test client.
+    pub(in crate::token_rate_limit::valkey) async fn read_resp_command<R: tokio::io::AsyncRead + Unpin>(
+        reader: &mut R,
+    ) -> Option<Vec<Vec<u8>>> {
         let mut prefix = [0_u8; 1];
         tokio::io::AsyncReadExt::read_exact(reader, &mut prefix).await.ok()?;
         if prefix[0] != b'*' {
@@ -1582,6 +1622,7 @@ mod tests {
             (TlsServerRole::PrimaryReplica, "ROLE") => {
                 b"*5\r\n$5\r\nslave\r\n$9\r\n127.0.0.1\r\n:6379\r\n$9\r\nconnected\r\n:0\r\n".to_vec()
             },
+            (TlsServerRole::DropReads, "GET" | "SCAN") => Vec::new(),
             (_, "PING") => b"+PONG\r\n".to_vec(),
             _ => b"+OK\r\n".to_vec(),
         }
@@ -1606,6 +1647,9 @@ mod tests {
     async fn serve_plain_resp_connection(mut stream: tokio::net::TcpStream, role: TlsServerRole) {
         while let Some(command) = read_resp_command(&mut stream).await {
             let response = resp_for(&command, role);
+            if response.is_empty() {
+                return;
+            }
             if tokio::io::AsyncWriteExt::write_all(&mut stream, &response)
                 .await
                 .is_err()
@@ -1696,6 +1740,47 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "read and mutation error policies share one transport fault fixture"
+    )]
+    async fn accounting_reads_are_retryable_but_mutation_pipelines_remain_unconfirmed() {
+        let server = start_plain_resp_server(TlsServerRole::DropReads);
+        let connection = ValkeyConnection::new(format!("redis://127.0.0.1:{}", server.port)).unwrap();
+        let mut read = redis::pipe();
+        read.cmd("GET").arg("generation");
+        let result: Result<(Option<String>,), _> = connection.read_pipeline(&read).await;
+        assert!(
+            matches!(result, Err(BackendError::Unavailable(_))),
+            "a lost read reply must remain retryable before any accounting mutation"
+        );
+        assert!(
+            connection.connection.lock().unwrap().is_none(),
+            "failed read socket must be fenced"
+        );
+        let result: Result<(Option<String>,), _> = connection.pipeline(&read).await;
+        assert!(
+            matches!(result, Err(BackendError::Unconfirmed(_))),
+            "the mutation-capable API must conservatively retain ambiguous outcomes"
+        );
+
+        for result in [
+            super::super::read_accounting_marker(&connection, "namespace", "marker")
+                .await
+                .map(|_| ()),
+            super::super::ensure_accounting_generation(&connection, "namespace").await,
+            super::super::scan_namespace_state(&connection, "namespace")
+                .await
+                .map(|_| ()),
+        ] {
+            assert!(
+                matches!(result, Err(BackendError::Unavailable(_))),
+                "marker, generation, and namespace scans must all use the read-only error policy"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn unavailable_sentinel_fails_closed_without_caching_a_connection() {
         let connection = ValkeyConnection::sentinel(
             vec!["redis://127.0.0.1:1".into()],
@@ -1754,6 +1839,29 @@ mod tests {
         assert!(!super::advances_topology_generation(&ordinary));
         assert!(super::advances_topology_generation(&readonly));
         assert!(super::advances_topology_generation(&dropped));
+    }
+
+    #[test]
+    fn transaction_read_failures_are_retryable_and_still_fence_topology() {
+        let connection = ValkeyConnection::new("redis://127.0.0.1:1".into()).unwrap();
+        let dropped = redis::RedisError::from(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        assert!(
+            matches!(
+                connection.transaction_read_error(&dropped),
+                BackendError::Unavailable(_)
+            ),
+            "an undispatched settlement remains safe to retry after a read disconnect"
+        );
+        assert_eq!(
+            connection.topology_generation.load(Ordering::Acquire),
+            1,
+            "read disconnect must fence topology"
+        );
+        assert_eq!(
+            connection.generation.load(Ordering::Acquire),
+            1,
+            "read disconnect must fence the shared socket"
+        );
     }
 
     #[test]
@@ -2103,6 +2211,7 @@ mod tests {
         let result: Result<(String,), BackendError> = connection.pipeline(&pipe).await;
         assert_eq!(result.expect("plain Sentinel request should succeed").0, "PONG");
 
+        drop(sentinel);
         *connection.connection.lock().unwrap() = None;
         let cached: Result<(String,), BackendError> = connection.pipeline(&pipe).await;
         assert_eq!(cached.expect("cached plain primary request should succeed").0, "PONG");
@@ -2125,6 +2234,97 @@ mod tests {
             .await
             .expect("plain Sentinel transaction should reuse its pooled socket");
         drop(second);
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "silent and healthy endpoints share one bounded discovery fixture"
+    )]
+    async fn plain_sentinel_skips_a_connected_but_silent_first_endpoint() {
+        let hanging = start_hanging_plain_server();
+        let primary = start_plain_resp_server(TlsServerRole::Primary);
+        let sentinel = start_plain_resp_server(TlsServerRole::Sentinel {
+            primary_port: primary.port,
+        });
+        let connection = ValkeyConnection::sentinel(
+            vec![
+                format!("redis://127.0.0.1:{}", hanging.port),
+                format!("redis://127.0.0.1:{}", sentinel.port),
+            ],
+            "mymaster".into(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            ValkeyTimeouts {
+                connect: Duration::from_millis(50),
+                operation: Duration::from_millis(50),
+                discovery: Duration::from_secs(1),
+            },
+            "shared_kv",
+        )
+        .unwrap();
+        let mut pipe = redis::pipe();
+        pipe.cmd("PING");
+        let result: (String,) = connection
+            .read_pipeline(&pipe)
+            .await
+            .expect("healthy later Sentinel must be tried");
+        assert_eq!(
+            result.0, "PONG",
+            "a silent first endpoint must not consume the complete deadline"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "TLS fallback test owns trust material and two independent Sentinels"
+    )]
+    async fn tls_sentinel_skips_stalled_and_malformed_endpoints() {
+        let (certificates, server_config) = tls_test_material();
+        let hanging = start_hanging_plain_server();
+        let primary = start_tls_resp_server(Arc::clone(&server_config), TlsServerRole::Primary);
+        let malformed = start_tls_resp_server(Arc::clone(&server_config), TlsServerRole::SentinelBadAddress);
+        let sentinel = start_tls_resp_server(
+            server_config,
+            TlsServerRole::Sentinel {
+                primary_port: primary.port,
+            },
+        );
+        let mut connection = ValkeyConnection::sentinel(
+            vec![
+                format!("rediss://localhost:{}", hanging.port),
+                format!("rediss://localhost:{}", malformed.port),
+                format!("rediss://localhost:{}", sentinel.port),
+            ],
+            "mymaster".into(),
+            None,
+            None,
+            None,
+            None,
+            true,
+            ValkeyTimeouts {
+                connect: Duration::from_secs(1),
+                operation: Duration::from_secs(1),
+                discovery: Duration::from_secs(2),
+            },
+            "shared_kv",
+        )
+        .unwrap();
+        connection.install_test_tls_certificates(certificates).unwrap();
+        let mut pipe = redis::pipe();
+        pipe.cmd("PING");
+        let result: (String,) = connection
+            .read_pipeline(&pipe)
+            .await
+            .expect("valid later TLS Sentinel must be tried");
+        assert_eq!(
+            result.0, "PONG",
+            "a malformed first address must not starve healthy Sentinels"
+        );
     }
 
     #[tokio::test]

@@ -673,7 +673,7 @@ impl ValkeyTokenBucketBackend {
         let reply: redis::Value = read
             .query_async(connection)
             .await
-            .map_err(|error| self.valkey.transaction_command_error(&error))?;
+            .map_err(|error| self.valkey.transaction_read_error(&error))?;
         let (value, fields): ReconcileReply =
             redis::from_redis_value(reply).map_err(|_error| BackendError::InvalidResponse)?;
         Ok((value, self.bucket(id, fields, request.now_ms)))
@@ -772,6 +772,11 @@ impl TokenRateLimitStateBackend for ValkeyTokenBucketBackend {
         &self.rule
     }
 }
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, reason = "tests")]
+mod settlement_tests;
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
