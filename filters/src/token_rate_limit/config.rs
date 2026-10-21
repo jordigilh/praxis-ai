@@ -1048,46 +1048,11 @@ pub(super) struct BackendConfig {
     #[serde(default)]
     pub topology: Option<BackendTopology>,
 
-    /// Key namespace prefix, so multiple filter rules or deployments can
-    /// share one Redis/Valkey instance without colliding. The namespace is
-    /// configured once for the whole filter, not per rule, so changing it
-    /// starts a fresh accounting generation and fresh budgets for every rule
-    /// in that filter. Ignored for `kind: memory`. Defaults to
-    /// `"praxis:token_rate_limit"` when unset.
-    ///
-    /// The shared backend permanently records a schema-versioned fingerprint for each
-    /// namespace/rule/algorithm identity. Replicas with a different window,
-    /// capacity, refill rate, reservation timeout, state bound, or compiled
-    /// budget-key policy fail closed with 503 before mutating shared state.
-    /// The compatibility markers use
-    /// `{namespace}:v2:sw:rule:{hash}:accounting-config` for sliding windows
-    /// and `{namespace}:v2:tb:rule:{hash}:accounting-config` for token
-    /// buckets. The fingerprint also includes the compiled estimation
-    /// strategy and effective token-type weights, but never request-derived
-    /// values such as one request's `max_tokens`. On first use, the backend
-    /// scans the namespace for unmarked `v2` keys before claiming a persistent
-    /// generation marker; the scan is bounded and fails closed rather than
-    /// adopting a partial result. Pre-marker state fails closed and leaves a
-    /// persistent `{namespace}:v2:accounting-generation` tombstone that
-    /// requires a new namespace generation rather than being silently
-    /// adopted. This protects against quota state surviving an expiring
-    /// per-rule retained-key index. The first bootstrap must run with
-    /// pre-marker writers quiesced because those writers do not participate in
-    /// the scan/claim protocol.
-    ///
-    /// To make an intentional semantic change, quiesce the old generation,
-    /// cut every writer over to a new namespace generation, and only then
-    /// retire the complete old namespace. Do not delete only a compatibility
-    /// marker: doing so can bind a new configuration to incompatible residual
-    /// quota state. Avoid serving traffic from both generations during the
-    /// cutover because their budgets are independent. Changing configuration
-    /// in place is deliberately rejected.
+    /// Validated namespace; operator guidance lives on [`RawBackendConfig`].
     #[serde(default)]
     pub namespace: Option<String>,
 
-    /// Expected shared-backend failure behavior. Closed is the safe default;
-    /// open is an explicit enforcement waiver for dependency outages. This
-    /// is separate from the pipeline-level `failure_mode` setting.
+    /// Validated failure policy; operator guidance lives on [`RawBackendConfig`].
     #[serde(default)]
     pub on_failure: BackendOnFailure,
 
@@ -1131,16 +1096,60 @@ struct RawBackendConfig {
     /// Backend implementation selector.
     #[serde(default)]
     kind: BackendKind,
-    /// Standalone Redis/Valkey URL, if configured.
+    /// Standalone Redis/Valkey URL. Exactly one of `url` or `sentinel` is
+    /// required for `kind: redis` or `kind: valkey`; they are mutually exclusive.
+    /// Ignored for `kind: memory`. Use `rediss://` or `valkeys://` for verified
+    /// TLS and `${ENV_VAR}` substitution for credentials supplied at deployment.
     #[serde(default)]
     url: Option<String>,
-    /// Sentinel topology, if configured, with ordered endpoints and service credentials.
+    /// Sentinel topology with ordered endpoints and separate Sentinel/data
+    /// credentials. Exactly one of `url` or `sentinel` is required for
+    /// `kind: redis` or `kind: valkey`; they are mutually exclusive. Ignored for
+    /// `kind: memory`. TLS is derived from the endpoint scheme: `rediss://` or
+    /// `valkeys://` enables verified TLS without a separate boolean.
     #[serde(default)]
     sentinel: Option<RawSentinelConfig>,
-    /// Shared key namespace.
+    /// Key namespace prefix, so multiple filter rules or deployments can
+    /// share one Redis/Valkey instance without colliding. The namespace is
+    /// configured once for the whole filter, not per rule, so changing it
+    /// starts a fresh accounting generation and fresh budgets for every rule
+    /// in that filter. Ignored for `kind: memory`. Defaults to
+    /// `"praxis:token_rate_limit"` when unset.
+    ///
+    /// The shared backend permanently records a schema-versioned fingerprint for each
+    /// namespace/rule/algorithm identity. Replicas with a different window,
+    /// capacity, refill rate, reservation timeout, state bound, or compiled
+    /// budget-key policy fail closed with 503 before mutating shared state.
+    /// The compatibility markers use
+    /// `{namespace}:v2:sw:rule:{hash}:accounting-config` for sliding windows
+    /// and `{namespace}:v2:tb:rule:{hash}:accounting-config` for token
+    /// buckets. The fingerprint also includes the compiled estimation
+    /// strategy and effective token-type weights, but never request-derived
+    /// values such as one request's `max_tokens`. On first use, the backend
+    /// scans the namespace for unmarked `v2` keys before claiming a persistent
+    /// generation marker; the scan is bounded and fails closed rather than
+    /// adopting a partial result. Pre-marker state fails closed and leaves a
+    /// persistent `{namespace}:v2:accounting-generation` tombstone that
+    /// requires a new namespace generation rather than being silently
+    /// adopted. This protects against quota state surviving an expiring
+    /// per-rule retained-key index. The first bootstrap must run with
+    /// pre-marker writers quiesced because those writers do not participate in
+    /// the scan/claim protocol.
+    ///
+    /// To make an intentional semantic change, quiesce the old generation,
+    /// cut every writer over to a new namespace generation, and only then
+    /// retire the complete old namespace. Do not delete only a compatibility
+    /// marker: doing so can bind a new configuration to incompatible residual
+    /// quota state. Avoid serving traffic from both generations during the
+    /// cutover because their budgets are independent. Changing configuration
+    /// in place is deliberately rejected.
     #[serde(default)]
     namespace: Option<String>,
-    /// Backend failure policy.
+    /// Expected shared-backend failure behavior. `closed` is the safe default:
+    /// return 503 without calling upstream. `open` explicitly waives enforcement
+    /// during dependency outages: call upstream once without a reservation
+    /// handle. Configuration mismatches always fail closed. This policy is
+    /// separate from the pipeline-level `failure_mode` setting.
     #[serde(default)]
     on_failure: BackendOnFailure,
     /// Maximum data-node connection time as a duration string; defaults to 500ms.
@@ -1155,20 +1164,23 @@ struct RawBackendConfig {
 #[serde(deny_unknown_fields)]
 /// Raw Sentinel fields converted into [`SentinelConfig`].
 struct RawSentinelConfig {
-    /// Ordered Sentinel endpoints.
+    /// Ordered Sentinel endpoints (1..=16). Three independent endpoints are
+    /// recommended operationally; one is accepted for local development.
+    /// Use a consistent plain (`redis://`/`valkey://`) or verified TLS
+    /// (`rediss://`/`valkeys://`) scheme, including after `${ENV_VAR}` expansion.
     endpoints: Vec<String>,
     /// Monitored primary service name.
     service_name: String,
     /// Optional Sentinel ACL username.
     #[serde(default)]
     sentinel_username: Option<String>,
-    /// Optional Sentinel ACL password.
+    /// Optional Sentinel ACL password, preferably supplied via `${ENV_VAR}`.
     #[serde(default)]
     sentinel_password: Option<String>,
     /// Optional data-node ACL username.
     #[serde(default)]
     redis_username: Option<String>,
-    /// Optional data-node ACL password.
+    /// Optional data-node ACL password, preferably supplied via `${ENV_VAR}`.
     #[serde(default)]
     redis_password: Option<String>,
     /// Maximum Sentinel discovery time as a duration string; defaults to 5s.

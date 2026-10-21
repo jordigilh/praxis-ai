@@ -34,7 +34,7 @@ On successful discovery, one `mcp_list_tools` output item per resolved server (i
 | `connectors[].id` | string | yes | Connector identifier referenced in requests. |
 | `connectors[].server_url` | string | yes | MCP server URL for this connector. |
 | `connectors[].tool_policy` | `deny` \| `allow_all` \| `read_only` | no | Operator policy for tools from this connector. Defaults to `deny` and is enforced in protected mode: `allow_all` admits every tool, while `read_only` admits only tools the service affirmatively classifies as read-only. This classification does not itself prevent side effects; enforce write restrictions at the service or with scoped credentials. |
-| `tool_admission` | ToolAdmissionConfig | no | Operator metadata-admission policy. Defaults to advisory (unchanged behavior), so existing non-protected deployments are not affected. |
+| `tool_admission` | object | no | Operator metadata-admission policy. Defaults to advisory (unchanged behavior), so existing non-protected deployments are not affected. |
 | `tool_admission.mode` | `advisory` \| `protected` | no | Admission mode (`advisory` default, or `protected`). |
 
 ## Examples

@@ -895,9 +895,17 @@ fn append_rendered_fields(
     for field in raw_fields {
         let path = field_path(prefix, &field.name);
         if !field.flatten {
+            let rendered_type = render_field_type(field, &items.enums);
+            // Known nested structs are YAML objects, not their internal Rust
+            // deserialization type names (for example RawSentinelConfig).
+            let type_str = if items.structs.contains_key(&rendered_type) {
+                "object".to_owned()
+            } else {
+                rendered_type
+            };
             out.push(FieldInfo {
                 name: path.clone(),
-                type_str: render_field_type(field, &items.enums),
+                type_str,
                 doc: field.doc.clone(),
                 required: required_kind(field),
             });
@@ -2344,6 +2352,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "nested YAML fixture and its shape assertions stay together"
+    )]
     fn nested_config_fields_render_dotted_paths() {
         let source = "
             #[derive(Debug, Deserialize)]
@@ -2378,6 +2390,57 @@ mod tests {
         let names: Vec<&str> = filter.fields.iter().map(|field| field.name.as_str()).collect();
         assert!(names.contains(&"headers.method"), "nested object field should render");
         assert!(names.contains(&"clusters[].name"), "nested list field should render");
+        assert_eq!(
+            filter
+                .fields
+                .iter()
+                .find(|field| field.name == "headers")
+                .unwrap()
+                .type_str,
+            "object",
+            "known config structs must render as YAML objects rather than internal Rust names"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "operator-facing backend documentation is checked as one contract"
+    )]
+    fn raw_backend_docs_preserve_operator_guidance_and_yaml_shape() {
+        let root = workspace_root();
+        let shared = parse_shared_config_items(&root);
+        let filters = discover_all_filters(&root, &shared);
+        let entry = filters
+            .iter()
+            .find(|entry| entry.filter.name == "token_rate_limit")
+            .unwrap();
+        let field = |name: &str| entry.filter.fields.iter().find(|field| field.name == name).unwrap();
+        assert_eq!(
+            field("backend.sentinel").type_str,
+            "object",
+            "Sentinel is a YAML object"
+        );
+        for guidance in ["praxis:token_rate_limit", "fingerprint", "tombstone", "quiesce"] {
+            assert!(
+                field("backend.namespace").doc.contains(guidance),
+                "namespace docs must preserve {guidance}"
+            );
+        }
+        assert!(
+            field("backend.on_failure").doc.contains("without a reservation"),
+            "fail-open behavior must be documented"
+        );
+        for name in ["backend.url", "backend.sentinel"] {
+            assert!(
+                field(name).doc.contains("Exactly one"),
+                "{name} must explain topology exclusivity"
+            );
+        }
+        assert!(
+            field("backend.sentinel.sentinel_password").doc.contains("${ENV_VAR}"),
+            "credentials should use deployment secrets"
+        );
     }
 
     #[test]
