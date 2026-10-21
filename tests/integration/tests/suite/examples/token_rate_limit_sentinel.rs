@@ -38,6 +38,20 @@ fn replace_required(yaml: &str, from: &str, to: &str) -> String {
     yaml.replace(from, to)
 }
 
+fn assert_replication_caught_up(primary: u64, replica: u64) {
+    assert!(
+        replica >= primary,
+        "replica must acknowledge the observed primary offset: primary={primary}, replica={replica}"
+    );
+}
+
+fn fixture_offset(name: &str) -> u64 {
+    env::var(name)
+        .unwrap_or_else(|error| panic!("fixture must export {name}: {error}"))
+        .parse()
+        .unwrap_or_else(|error| panic!("fixture offset {name} must be an unsigned integer: {error}"))
+}
+
 fn fixture_config_with_rule(
     proxy_port: u16,
     backend_port: u16,
@@ -52,10 +66,9 @@ fn fixture_config_with_rule(
         Ok("1"),
         "the fixture must acknowledge primary/replica offset convergence before tests"
     );
-    assert_eq!(
-        env::var("TOKEN_RATE_LIMIT_SENTINEL_PRIMARY_REPLICATION_OFFSET").ok(),
-        env::var("TOKEN_RATE_LIMIT_SENTINEL_REPLICA_REPLICATION_OFFSET").ok(),
-        "the fixture must export matching primary and replica replication offsets"
+    assert_replication_caught_up(
+        fixture_offset("TOKEN_RATE_LIMIT_SENTINEL_PRIMARY_REPLICATION_OFFSET"),
+        fixture_offset("TOKEN_RATE_LIMIT_SENTINEL_REPLICA_REPLICATION_OFFSET"),
     );
     let endpoints = endpoint_env.split(',').map(str::trim).collect::<Vec<_>>();
     assert!(endpoints.len() >= 3, "fixture must expose at least three Sentinels");
@@ -483,6 +496,18 @@ fn required_fixture_replacement_updates_the_expected_fragment() {
 #[should_panic(expected = "no longer contains the fragment the fixture patches")]
 fn required_fixture_replacement_rejects_example_drift() {
     drop(replace_required("sentinel: changed", "old", "new"));
+}
+
+#[test]
+fn replication_barrier_accepts_a_replica_ahead_of_the_primary_snapshot() {
+    assert_replication_caught_up(42, 42);
+    assert_replication_caught_up(42, 43);
+}
+
+#[test]
+#[should_panic(expected = "replica must acknowledge the observed primary offset")]
+fn replication_barrier_rejects_a_replica_behind_the_primary_snapshot() {
+    assert_replication_caught_up(42, 41);
 }
 
 #[test]

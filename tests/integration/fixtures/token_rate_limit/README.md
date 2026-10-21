@@ -31,6 +31,22 @@ token-bucket quota denial; this fixture owns deterministic topology
 startup/readiness and lifecycle cleanup rather than the complete release
 matrix.
 
+Readiness snapshots the primary replication offset and waits for an attached
+replica to acknowledge at least that offset. The two observed offsets need not
+be equal: Sentinel traffic may advance the log between INFO calls.
+
+CI also runs the existing standalone state, reconciliation, and cross-gateway
+identity/quota contracts against each pinned product. The fixture invokes
+`run-standalone-contracts.sh`, which requires Python 3 to encode the ephemeral
+data credentials and selects the existing Valkey-named contract targets for
+either wire-compatible product. Its proxy binary includes `basic-auth-filter`
+as well as `token-rate-limit-filter` for the authenticated-subject contract.
+These backend-backed results are compatibility evidence, not hermetic unit
+coverage.
+The standalone phase stops only its own Sentinels before running fault tests,
+because those tests intentionally pause the data node. Each HA phase starts a
+fresh topology with all three Sentinels active.
+
 Set `SENTINEL_DEAD_ENDPOINT=redis://127.0.0.1:1` to prepend an unavailable
 Sentinel endpoint. The real client must skip it and discover through the
 remaining healthy endpoints.

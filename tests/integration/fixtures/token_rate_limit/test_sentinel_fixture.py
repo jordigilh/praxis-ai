@@ -22,7 +22,11 @@ case "$1" in
     [[ "$2" != -i ]] || IFS= read -r password
     case "$*" in
       *get-master-addr-by-name*) printf '127.0.0.1\\n26379\\n' ;;
-      *'INFO replication'*) printf 'master_repl_offset:42\\r\\nmaster_link_status:up\\r\\n' ;;
+      *'INFO replication'*)
+        offset=42
+        [[ "$*" != *'-p 26380 '* ]] || offset="$FIXTURE_REPLICA_OFFSET"
+        printf 'master_repl_offset:%s\\r\\nmaster_link_status:up\\r\\n' "$offset"
+        ;;
       *'INFO server'*) printf 'redis_version:8.10.2\\r\\n' ;;
     esac
     ;;
@@ -31,7 +35,7 @@ esac
 
 
 class SentinelFixtureLifecycle(unittest.TestCase):
-    def run_fixture(self, stop_signal=None):
+    def run_fixture(self, stop_signal=None, replica_offset=42):
         with tempfile.TemporaryDirectory(prefix="sentinel-lifecycle-") as directory:
             root = Path(directory)
             engine = root / "fake-engine"
@@ -40,7 +44,10 @@ class SentinelFixtureLifecycle(unittest.TestCase):
             log = root / "engine.log"
             env_file = root / "fixture.env"
             env = os.environ.copy()
-            env.update(CONTAINER_ENGINE=str(engine), FIXTURE_ENGINE_LOG=str(log))
+            env.update(
+                CONTAINER_ENGINE=str(engine), FIXTURE_ENGINE_LOG=str(log),
+                FIXTURE_REPLICA_OFFSET=str(replica_offset),
+            )
             args = [
                 "bash", str(FIXTURE), "--product", "redis", "--image",
                 "controlled-fixture@sha256:0000", "--env-file", str(env_file),
@@ -86,6 +93,65 @@ class SentinelFixtureLifecycle(unittest.TestCase):
 
     def test_child_failure_exits_and_cleans_once(self):
         self.run_fixture()
+
+    def test_replica_ahead_of_primary_snapshot_is_ready(self):
+        self.run_fixture(replica_offset=43)
+
+    def test_standalone_contracts_require_fixture_credentials(self):
+        environment = {"PATH": os.environ["PATH"]}
+        result = subprocess.run(
+            ["bash", str(FIXTURE.with_name("run-standalone-contracts.sh"))],
+            env=environment, capture_output=True, text=True, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0, "missing fixture inputs must fail, not skip")
+        self.assertIn("run inside the pinned topology fixture", result.stderr)
+
+    def test_standalone_contracts_encode_credentials_and_select_existing_targets(self):
+        with tempfile.TemporaryDirectory(prefix="standalone-contracts-") as directory:
+            root = Path(directory)
+            make = root / "make"
+            make.write_text(
+                '#!/usr/bin/env bash\nset -eu\n'
+                '[[ -z "${TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS+x}" ]]\n'
+                'printf "%s\\t%s\\t%s\\n" "$*" "$RUST_TEST_THREADS" '
+                '"$TOKEN_RATE_LIMIT_VALKEY_URL" >> "$FIXTURE_CONTRACT_LOG"\n'
+            )
+            make.chmod(0o700)
+            engine = root / "engine"
+            engine.write_text('#!/usr/bin/env bash\nset -eu\nprintf "%s\\n" "$*" >> "$FIXTURE_STOP_LOG"\n')
+            engine.chmod(0o700)
+            log = root / "contracts.log"
+            stops = root / "stops.log"
+            environment = {
+                "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
+                "TOKEN_RATE_LIMIT_SENTINEL_PRIMARY_PORT": "26379",
+                "TOKEN_RATE_LIMIT_SENTINEL_DATA_PASSWORD": "not:real@secret",
+                "TOKEN_RATE_LIMIT_SENTINEL_ENGINE": str(engine),
+                "TOKEN_RATE_LIMIT_SENTINEL_CONTAINER_PREFIX": "owned-fixture",
+                "TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS": "redis://127.0.0.1:26381",
+                "FIXTURE_CONTRACT_LOG": str(log),
+                "FIXTURE_STOP_LOG": str(stops),
+            }
+            subprocess.run(
+                ["bash", str(FIXTURE.with_name("run-standalone-contracts.sh"))],
+                env=environment, check=True, capture_output=True, text=True,
+            )
+            calls = [line.split("\t") for line in log.read_text().splitlines()]
+            self.assertEqual(
+                stops.read_text().splitlines(),
+                [f"stop owned-fixture-sentinel-{index}" for index in range(1, 4)],
+                "standalone isolation must stop only this fixture's Sentinels",
+            )
+            self.assertEqual(
+                [call[0] for call in calls],
+                ["test-token-rate-limit-valkey-unit", "test-token-rate-limit-valkey-integration"],
+                "the pinned lane must run both existing standalone contract tiers",
+            )
+            self.assertTrue(all(call[1] == "1" for call in calls), "live contract tests must run serially")
+            self.assertTrue(
+                all(call[2] == "redis://:not%3Areal%40secret@127.0.0.1:26379" for call in calls),
+                "standalone URLs must percent-encode fixture credentials",
+            )
 
 
 if __name__ == "__main__":

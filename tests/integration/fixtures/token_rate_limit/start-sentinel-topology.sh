@@ -214,7 +214,11 @@ wait_for_replication_catchup() {
         primary_offset=$(info_field "${prefix}-primary" "$primary_port" master_repl_offset)
         replica_offset=$(info_field "${prefix}-replica" "$replica_port" master_repl_offset)
         replica_link=$(info_field "${prefix}-replica" "$replica_port" master_link_status)
-        if [[ -n "$primary_offset" && "$primary_offset" == "$replica_offset" && "$replica_link" == up ]]; then
+        # Sentinel traffic can advance replication between these INFO calls.
+        # The replica must acknowledge the observed primary snapshot, not an
+        # impossible simultaneous equality with a continuously advancing log.
+        if [[ "$primary_offset" =~ ^[0-9]+$ && "$replica_offset" =~ ^[0-9]+$ && "$replica_link" == up ]] &&
+            ((replica_offset >= primary_offset)); then
             export TOKEN_RATE_LIMIT_SENTINEL_REPLICATION_OFFSET_CONFIRMED=1
             export TOKEN_RATE_LIMIT_SENTINEL_PRIMARY_REPLICATION_OFFSET="$primary_offset"
             export TOKEN_RATE_LIMIT_SENTINEL_REPLICA_REPLICATION_OFFSET="$replica_offset"

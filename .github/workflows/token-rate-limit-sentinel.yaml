@@ -85,10 +85,17 @@ jobs:
         run: cargo tree --locked --package redis
 
       - name: Build the proxy binary (compile gate)
-        run: cargo build -p praxis-ai-proxy --bin praxis-ai --features token-rate-limit-filter
+        run: cargo build -p praxis-ai-proxy --bin praxis-ai --features basic-auth-filter,token-rate-limit-filter
 
       - name: Run token-rate-limit unit suite
         run: cargo test -p praxis-ai-filters --features token-rate-limit-filter token_rate_limit --lib
+
+      - name: Run standalone contracts on the pinned product
+        run: |
+          tests/integration/fixtures/token_rate_limit/start-sentinel-topology.sh \
+            --product "$SENTINEL_PRODUCT" --image "$SENTINEL_IMAGE" \
+            --env-file "$RUNNER_TEMP/standalone.env" -- \
+            bash tests/integration/fixtures/token_rate_limit/run-standalone-contracts.sh
 
       - name: Run Sentinel fixture integration
         run: make test-token-rate-limit-sentinel-integration \
