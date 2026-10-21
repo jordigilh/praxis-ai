@@ -110,6 +110,8 @@ pub(in crate::token_rate_limit) struct ValkeyConnection {
     /// Cached multiplexed connection for pipelines; cleared on any error so
     /// the next call reconnects instead of reusing a wedged socket.
     connection: Arc<Mutex<Option<CachedConnection>>>,
+    /// Single-flight shared-socket establishment; cache hits never acquire it.
+    shared_open: Arc<tokio::sync::Mutex<()>>,
     /// Dedicated connections for `WATCH` transactions.
     transactions: Arc<TransactionConnections>,
     /// Generation of the cached shared connection.
@@ -212,6 +214,7 @@ impl ValkeyConnection {
         Ok(Self {
             source: Arc::new(ConnectionSource::Standalone(client)),
             connection: Arc::new(Mutex::new(None)),
+            shared_open: Arc::new(tokio::sync::Mutex::new(())),
             transactions: Arc::new(TransactionConnections::default()),
             generation: Arc::new(AtomicU64::new(0)),
             topology_generation: Arc::new(AtomicU64::new(0)),
@@ -399,6 +402,7 @@ impl ValkeyConnection {
         Ok(Self {
             source: Arc::new(source),
             connection: Arc::new(Mutex::new(None)),
+            shared_open: Arc::new(tokio::sync::Mutex::new(())),
             transactions: Arc::new(TransactionConnections::default()),
             generation: Arc::new(AtomicU64::new(0)),
             topology_generation: Arc::new(AtomicU64::new(0)),
@@ -616,6 +620,19 @@ impl ValkeyConnection {
         })
     }
 
+    /// Return a shared handle only while its cache generation is current.
+    fn cached_shared(&self) -> Option<(MultiplexedConnection, u64)> {
+        let cached = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation = self.generation.load(Ordering::Acquire);
+        cached
+            .as_ref()
+            .filter(|entry| entry.generation == generation)
+            .map(|entry| (entry.connection.clone(), entry.generation))
+    }
+
     /// Return the cached shared connection, opening (and caching) a fresh
     /// one on first use or after a prior failure cleared it.
     #[expect(
@@ -628,20 +645,21 @@ impl ValkeyConnection {
             ConnectionSource::Sentinel { .. } | ConnectionSource::SentinelTls { .. } => self.timeouts.discovery,
         };
         let deadline = Instant::now() + lock_timeout;
-        {
-            let cached = self
-                .connection
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let current_generation = self.generation.load(Ordering::Acquire);
-            if let Some(entry) = cached.as_ref()
-                && entry.generation == current_generation
-            {
-                return Ok((entry.connection.clone(), entry.generation));
-            }
+        if let Some(cached) = self.cached_shared() {
+            return Ok(cached);
         }
-
+        // Hold only the asynchronous cold-open gate across connection work.
+        // Waiting and opening share one deadline, including after failover.
+        let _opening_guard = tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            self.shared_open.lock(),
+        )
+        .await
+        .map_err(|_elapsed| BackendError::Unavailable("shared connection open timeout".into()))?;
         loop {
+            if let Some(cached) = self.cached_shared() {
+                return Ok(cached);
+            }
             let opening_generation = self.generation.load(Ordering::Acquire);
             let connection = self.open_until(deadline).await?;
             if self.generation.load(Ordering::Acquire) == opening_generation {
@@ -1444,7 +1462,7 @@ pub(super) mod tests {
     use std::{
         sync::{
             Arc,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::{Duration, Instant},
     };
@@ -1474,6 +1492,7 @@ pub(super) mod tests {
 
     struct TlsRespServer {
         port: u16,
+        accepted: Arc<AtomicUsize>,
         shutdown: Option<tokio::sync::oneshot::Sender<()>>,
         task: tokio::task::JoinHandle<()>,
     }
@@ -1671,12 +1690,15 @@ pub(super) mod tests {
         let listener = tokio::net::TcpListener::from_std(listener).expect("adopt TLS listener");
         let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
         let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let accepted_for_task = Arc::clone(&accepted);
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
                     accepted = listener.accept() => {
                         let Ok((stream, _peer)) = accepted else { break };
+                        accepted_for_task.fetch_add(1, Ordering::Relaxed);
                         let Ok(stream) = acceptor.accept(stream).await else { continue };
                         tokio::spawn(serve_tls_resp_connection(stream, role));
                     },
@@ -1685,6 +1707,7 @@ pub(super) mod tests {
         });
         TlsRespServer {
             port,
+            accepted,
             shutdown: Some(shutdown),
             task,
         }
@@ -1696,12 +1719,15 @@ pub(super) mod tests {
         listener.set_nonblocking(true).expect("set plain listener nonblocking");
         let listener = tokio::net::TcpListener::from_std(listener).expect("adopt plain listener");
         let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let accepted_for_task = Arc::clone(&accepted);
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
                     accepted = listener.accept() => {
                         let Ok((stream, _peer)) = accepted else { break };
+                        accepted_for_task.fetch_add(1, Ordering::Relaxed);
                         tokio::spawn(serve_plain_resp_connection(stream, role));
                     },
                 }
@@ -1709,6 +1735,7 @@ pub(super) mod tests {
         });
         TlsRespServer {
             port,
+            accepted,
             shutdown: Some(shutdown),
             task,
         }
@@ -1722,12 +1749,15 @@ pub(super) mod tests {
             .expect("set hanging listener nonblocking");
         let listener = tokio::net::TcpListener::from_std(listener).expect("adopt hanging listener");
         let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let accepted_for_task = Arc::clone(&accepted);
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
                     accepted = listener.accept() => {
                         let Ok((stream, _peer)) = accepted else { break };
+                        accepted_for_task.fetch_add(1, Ordering::Relaxed);
                         tokio::spawn(async move {
                             let _stream = stream;
                             std::future::pending::<()>().await;
@@ -1738,9 +1768,124 @@ pub(super) mod tests {
         });
         TlsRespServer {
             port,
+            accepted,
             shutdown: Some(shutdown),
             task,
         }
+    }
+
+    async fn shared_read_burst(connection: &ValkeyConnection) {
+        let barrier = Arc::new(tokio::sync::Barrier::new(128));
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..128 {
+            let connection = connection.clone();
+            let barrier = Arc::clone(&barrier);
+            tasks.spawn(async move {
+                barrier.wait().await;
+                let mut pipe = redis::pipe();
+                pipe.cmd("PING");
+                let reply: (String,) = connection
+                    .read_pipeline(&pipe)
+                    .await
+                    .expect("shared burst must complete");
+                assert_eq!(reply.0, "PONG", "every coalesced reader must receive its reply");
+            });
+        }
+        while let Some(task) = tasks.join_next().await {
+            task.expect("every shared reader task must succeed");
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one concurrent fixture covers standalone and Sentinel cache epochs"
+    )]
+    async fn concurrent_shared_cold_opens_are_single_flight() {
+        for use_sentinel in [false, true] {
+            let primary = start_plain_resp_server(TlsServerRole::Primary);
+            let sentinel = start_plain_resp_server(TlsServerRole::Sentinel {
+                primary_port: primary.port,
+            });
+            let connection = if use_sentinel {
+                ValkeyConnection::sentinel(
+                    vec![format!("redis://127.0.0.1:{}", sentinel.port)],
+                    "mymaster".into(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    ValkeyTimeouts::default(),
+                    "shared_kv",
+                )
+                .unwrap()
+            } else {
+                ValkeyConnection::new(format!("redis://127.0.0.1:{}", primary.port)).unwrap()
+            };
+            for epoch in 0..2 {
+                shared_read_burst(&connection).await;
+                let per_epoch = if use_sentinel { 2 } else { 1 };
+                assert_eq!(
+                    primary.accepted.load(Ordering::Relaxed),
+                    (epoch + 1) * per_epoch,
+                    "a shared epoch needs one data socket plus at most one native Sentinel ROLE probe"
+                );
+                assert_eq!(
+                    sentinel.accepted.load(Ordering::Relaxed),
+                    if use_sentinel { epoch + 1 } else { 0 },
+                    "Sentinel discovery must also stay coalesced across the burst"
+                );
+                let generation = connection.generation.load(Ordering::Acquire);
+                connection.invalidate(generation, true).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one owned gate verifies cold wait bounds and warm cache bypass"
+    )]
+    async fn shared_open_wait_is_bounded_and_cache_hits_bypass_it() {
+        let primary = start_plain_resp_server(TlsServerRole::Primary);
+        let connection = ValkeyConnection::standalone_with_timeouts_and_name(
+            format!("redis://127.0.0.1:{}", primary.port),
+            ValkeyTimeouts {
+                connect: Duration::from_millis(100),
+                ..ValkeyTimeouts::default()
+            },
+            "shared_kv",
+        )
+        .unwrap();
+        let mut pipe = redis::pipe();
+        pipe.cmd("PING");
+        let guard = connection.shared_open.lock().await;
+        let result = tokio::time::timeout(Duration::from_secs(1), connection.read_pipeline::<(String,)>(&pipe)).await;
+        assert!(
+            matches!(result, Ok(Err(BackendError::Unavailable(message))) if message.contains("shared connection open timeout")),
+            "waiting for another opener must honor the existing connection deadline"
+        );
+        assert_eq!(
+            primary.accepted.load(Ordering::Relaxed),
+            0,
+            "a blocked opener must not create a data socket"
+        );
+        drop(guard);
+        let reply: (String,) = connection
+            .read_pipeline(&pipe)
+            .await
+            .expect("released gate must permit recovery");
+        assert_eq!(reply.0, "PONG", "a later opener must recover after lock timeout");
+        let _guard = connection.shared_open.lock().await;
+        tokio::time::timeout(Duration::from_secs(1), shared_read_burst(&connection))
+            .await
+            .expect("warm cache hits must not wait for the cold-open gate");
+        assert_eq!(
+            primary.accepted.load(Ordering::Relaxed),
+            1,
+            "warm readers reuse the existing shared socket"
+        );
     }
 
     #[tokio::test]
