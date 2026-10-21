@@ -23,9 +23,19 @@ const SLIDING_QUOTA_RULE: &str = "            algorithm: sliding_window\n       
 const TOKEN_BUCKET_QUOTA_RULE: &str = "            algorithm: token_bucket\n            capacity: 500\n            refill_rate: 1\n            reserved_tokens: 500";
 const OPENAI_RESPONSE_BODY: &str =
     r#"{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":5,"total_tokens":10}}"#;
+const QUOTA_RESPONSE_BODY: &str =
+    r#"{"choices":[],"usage":{"prompt_tokens":250,"completion_tokens":250,"total_tokens":500}}"#;
 
 fn fixture_config(proxy_port: u16, backend_port: u16) -> praxis_core::config::Config {
     fixture_config_with_rule(proxy_port, backend_port, DEFAULT_RULE, "admission")
+}
+
+fn replace_required(yaml: &str, from: &str, to: &str) -> String {
+    assert!(
+        yaml.contains(from),
+        "token-rate-limit-sentinel.yaml no longer contains the fragment the fixture patches: {from:?}"
+    );
+    yaml.replace(from, to)
 }
 
 fn fixture_config_with_rule(
@@ -52,11 +62,12 @@ fn fixture_config_with_rule(
     let product = env::var("TOKEN_RATE_LIMIT_SENTINEL_PRODUCT").unwrap_or_else(|_| "valkey".to_owned());
     let path = example_config_path("token-rate-limit-sentinel.yaml");
     let mut yaml = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
-    yaml = yaml.replace(
+    yaml = replace_required(
+        &yaml,
         "kind: valkey # use `redis` for the Redis qualification lane",
         &format!("kind: {product}"),
     );
-    yaml = yaml.replace(DEFAULT_RULE, rule);
+    yaml = replace_required(&yaml, DEFAULT_RULE, rule);
     let namespace = format!(
         "{}          namespace: \"praxis:test:sentinel:{}:{label}:{}\"\n",
         env::var("TOKEN_RATE_LIMIT_SENTINEL_ON_FAILURE")
@@ -66,15 +77,21 @@ fn fixture_config_with_rule(
         std::process::id(),
         NAMESPACE_COUNTER.fetch_add(1, Ordering::Relaxed),
     );
-    yaml = yaml.replace("          sentinel:\n", &format!("{namespace}          sentinel:\n"));
+    yaml = replace_required(
+        &yaml,
+        "          sentinel:\n",
+        &format!("{namespace}          sentinel:\n"),
+    );
     if env::var("TOKEN_RATE_LIMIT_SENTINEL_DATA_PASSWORD").is_ok_and(|value| !value.is_empty()) {
-        yaml = yaml.replace(
+        yaml = replace_required(
+            &yaml,
             "            # redis_password: \"${TOKEN_RATE_LIMIT_REDIS_PASSWORD}\"",
             "            redis_password: \"${TOKEN_RATE_LIMIT_SENTINEL_DATA_PASSWORD}\"",
         );
     }
     if env::var("TOKEN_RATE_LIMIT_SENTINEL_PASSWORD").is_ok_and(|value| !value.is_empty()) {
-        yaml = yaml.replace(
+        yaml = replace_required(
+            &yaml,
             "            # sentinel_password: \"${TOKEN_RATE_LIMIT_SENTINEL_PASSWORD}\"",
             "            sentinel_password: \"${TOKEN_RATE_LIMIT_SENTINEL_PASSWORD}\"",
         );
@@ -85,7 +102,11 @@ fn fixture_config_with_rule(
         .collect::<Vec<_>>()
         .join("\n");
     let old_endpoints = "            endpoints:\n              - \"redis://127.0.0.1:36379\"\n              - \"redis://127.0.0.1:36380\"\n              - \"redis://127.0.0.1:36381\"";
-    yaml = yaml.replace(old_endpoints, &format!("            endpoints:\n{endpoint_lines}"));
+    yaml = replace_required(
+        &yaml,
+        old_endpoints,
+        &format!("            endpoints:\n{endpoint_lines}"),
+    );
     let patched = patch_yaml(&yaml, proxy_port, &HashMap::from([("127.0.0.1:9000", backend_port)]));
     praxis_core::config::Config::from_yaml(&patched).expect("Sentinel fixture config should parse")
 }
@@ -93,14 +114,19 @@ fn fixture_config_with_rule(
 /// Run the fixture's native Sentinel CLI without putting credentials in the
 /// container-engine argument list.
 fn sentinel_cli(args: &[&str]) -> std::process::Output {
+    fixture_cli(
+        "TOKEN_RATE_LIMIT_SENTINEL_SENTINEL_CONTAINER",
+        "TOKEN_RATE_LIMIT_SENTINEL_PASSWORD",
+        args,
+    )
+}
+
+fn fixture_cli(container_variable: &str, password_variable: &str, args: &[&str]) -> std::process::Output {
     let engine = env::var("TOKEN_RATE_LIMIT_SENTINEL_ENGINE").expect("fixture must export its container engine");
-    let container =
-        env::var("TOKEN_RATE_LIMIT_SENTINEL_SENTINEL_CONTAINER").expect("fixture must export its Sentinel container");
+    let container = env::var(container_variable).expect("fixture must export its container");
     let product = env::var("TOKEN_RATE_LIMIT_SENTINEL_PRODUCT").unwrap_or_else(|_| "valkey".to_owned());
     let cli = if product == "redis" { "redis-cli" } else { "valkey-cli" };
-    let password = env::var("TOKEN_RATE_LIMIT_SENTINEL_PASSWORD")
-        .ok()
-        .filter(|value| !value.is_empty());
+    let password = env::var(password_variable).ok().filter(|value| !value.is_empty());
 
     let mut command = Command::new(engine);
     if let Some(password) = password {
@@ -135,6 +161,48 @@ fn sentinel_cli(args: &[&str]) -> std::process::Output {
         .args(args)
         .output()
         .expect("run Sentinel CLI")
+}
+
+fn replication_info(container_variable: &str, port: &str) -> String {
+    let output = fixture_cli(
+        container_variable,
+        "TOKEN_RATE_LIMIT_SENTINEL_DATA_PASSWORD",
+        &["-p", port, "INFO", "replication"],
+    );
+    assert!(
+        output.status.success(),
+        "replication INFO failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("replication INFO must be UTF-8")
+}
+
+fn info_field<'a>(info: &'a str, field: &str) -> Option<&'a str> {
+    info.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        (name == field).then_some(value.trim())
+    })
+}
+
+/// Snapshot the primary offset after admission, then wait for that offset on
+/// the replica. Startup convergence alone cannot prove quota survived promotion.
+fn wait_for_admitted_quota_replication() {
+    let primary_port = env::var("TOKEN_RATE_LIMIT_SENTINEL_PRIMARY_PORT").expect("primary port");
+    let replica_port = env::var("TOKEN_RATE_LIMIT_SENTINEL_REPLICA_PORT").expect("replica port");
+    let primary = replication_info("TOKEN_RATE_LIMIT_SENTINEL_PRIMARY_CONTAINER", &primary_port);
+    let target = info_field(&primary, "master_repl_offset")
+        .expect("primary must report its replication offset")
+        .parse::<u64>()
+        .expect("primary replication offset must be an integer");
+    for _ in 0..100 {
+        let replica = replication_info("TOKEN_RATE_LIMIT_SENTINEL_REPLICA_CONTAINER", &replica_port);
+        let offset = info_field(&replica, "slave_repl_offset").and_then(|value| value.parse::<u64>().ok());
+        if info_field(&replica, "master_link_status") == Some("up") && offset.is_some_and(|offset| offset >= target) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("replica did not acknowledge admitted quota at primary offset {target}");
 }
 
 /// Trigger and observe Sentinel's planned promotion after the proxy has made
@@ -343,8 +411,10 @@ fn sentinel_fixture_warm_connection_reconnects_after_planned_failover() {
         return;
     }
     let backend = StatefulCapturingBackend::new(vec![
-        (200, OPENAI_RESPONSE_BODY.to_owned()),
-        (200, OPENAI_RESPONSE_BODY.to_owned()),
+        (200, QUOTA_RESPONSE_BODY.to_owned()),
+        (200, QUOTA_RESPONSE_BODY.to_owned()),
+        (200, QUOTA_RESPONSE_BODY.to_owned()),
+        (200, QUOTA_RESPONSE_BODY.to_owned()),
     ])
     .start_with_shutdown();
     let config = fixture_config(free_port(), backend.port());
@@ -356,6 +426,27 @@ fn sentinel_fixture_warm_connection_reconnects_after_planned_failover() {
         200,
         "the pre-failover request should warm the proxy connection: {first}"
     );
+    let sliding = start_proxy(&fixture_config_with_rule(
+        free_port(),
+        backend.port(),
+        SLIDING_QUOTA_RULE,
+        "failover-sliding-quota",
+    ));
+    let bucket = start_proxy(&fixture_config_with_rule(
+        free_port(),
+        backend.port(),
+        TOKEN_BUCKET_QUOTA_RULE,
+        "failover-bucket-quota",
+    ));
+    for quota_proxy in [&sliding, &bucket] {
+        let raw = http_send(quota_proxy.addr(), &json_post("/v1/chat/completions", "{}"));
+        assert_eq!(
+            parse_status(&raw),
+            200,
+            "quota must be admitted before promotion: {raw}"
+        );
+    }
+    wait_for_admitted_quota_replication();
     failover_warm_proxy_connection();
 
     let second = http_send(proxy.addr(), &json_post("/v1/chat/completions", "{}"));
@@ -364,7 +455,49 @@ fn sentinel_fixture_warm_connection_reconnects_after_planned_failover() {
         200,
         "the proxy must recover its existing Sentinel connection after failover: {second}"
     );
-    assert_eq!(backend.requests().len(), 2, "both requests must reach the upstream");
+    for quota_proxy in [&sliding, &bucket] {
+        let raw = http_send(quota_proxy.addr(), &json_post("/v1/chat/completions", "{}"));
+        assert_eq!(
+            parse_status(&raw),
+            429,
+            "replicated quota must still deny after promotion: {raw}"
+        );
+    }
+    assert_eq!(
+        backend.requests().len(),
+        4,
+        "only the initial three admissions and recovered request may invoke upstream"
+    );
+}
+
+#[test]
+fn required_fixture_replacement_updates_the_expected_fragment() {
+    assert_eq!(
+        replace_required("sentinel: old", "old", "new"),
+        "sentinel: new",
+        "the required fixture replacement must apply"
+    );
+}
+
+#[test]
+#[should_panic(expected = "no longer contains the fragment the fixture patches")]
+fn required_fixture_replacement_rejects_example_drift() {
+    drop(replace_required("sentinel: changed", "old", "new"));
+}
+
+#[test]
+fn replication_info_fields_accept_redis_and_valkey_line_endings() {
+    let info = "role:slave\r\nmaster_link_status:up\r\nslave_repl_offset:123\r\n";
+    assert_eq!(
+        info_field(info, "slave_repl_offset"),
+        Some("123"),
+        "parse replica offset"
+    );
+    assert_eq!(
+        info_field(info, "missing"),
+        None,
+        "absent replication fields stay absent"
+    );
 }
 
 #[test]
@@ -379,7 +512,10 @@ fn sentinel_health_noreplicas_failure() {
         return;
     }
     let on_failure = env::var("TOKEN_RATE_LIMIT_SENTINEL_ON_FAILURE").expect("fixture must set on_failure");
-    assert!(matches!(on_failure.as_str(), "closed" | "open"));
+    assert!(
+        matches!(on_failure.as_str(), "closed" | "open"),
+        "TOKEN_RATE_LIMIT_SENTINEL_ON_FAILURE must be closed or open, got: {on_failure}"
+    );
     let backend = StatefulCapturingBackend::new(vec![(200, OPENAI_RESPONSE_BODY.to_owned())]).start_with_shutdown();
     let config = fixture_config_with_rule(free_port(), backend.port(), SLIDING_QUOTA_RULE, "noreplicas");
     let proxy = start_proxy(&config);

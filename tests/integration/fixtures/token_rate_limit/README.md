@@ -20,7 +20,7 @@ into the container engine):
 ```console
 make test-token-rate-limit-sentinel-integration \
   SENTINEL_PRODUCT=valkey \
-  SENTINEL_IMAGE=registry.access.redhat.com/rhel10/valkey-8@sha256:5929be16ac020c4851d8dc1f5ead6d48c6da066a9a74349711186925ebd553b9
+  SENTINEL_IMAGE=registry.redhat.io/rhel10/valkey-8@sha256:5929be16ac020c4851d8dc1f5ead6d48c6da066a9a74349711186925ebd553b9
 ```
 
 The fixture intentionally does not use mutable tags. Failover, replication
@@ -36,10 +36,12 @@ Sentinel endpoint. The real client must skip it and discover through the
 remaining healthy endpoints.
 
 Set `SENTINEL_FAILOVER_BEFORE_COMMAND=1` to enable the planned-failover test.
-The integration test first warms an existing proxy connection, then triggers
-Sentinel promotion through the fixture container and waits for the replica to
-become the reported primary before sending the next request. This exercises
-recovery of a connection that was already in use before failover.
+The integration test first warms existing proxy connections and admits quota
+for both algorithms. It snapshots the primary replication offset after these
+admissions and waits for the replica to acknowledge that offset before
+triggering Sentinel promotion. After the replica becomes the reported primary,
+the test checks warm-connection recovery and continued sliding-window and
+token-bucket quota denial without extra upstream calls.
 
 Set `SENTINEL_REPLICATION_HEALTH_TEST=1` with
 `SENTINEL_ON_FAILURE=closed` or `open` to stop the replica after convergence,

@@ -16,6 +16,7 @@ env_file_written=0
 debug=${TOKEN_RATE_LIMIT_SENTINEL_DEBUG:-}
 replication_health_test=${TOKEN_RATE_LIMIT_SENTINEL_REPLICATION_HEALTH_TEST:-}
 on_failure=${TOKEN_RATE_LIMIT_SENTINEL_ON_FAILURE:-}
+keepalive_pid=""
 
 random_password() {
     openssl rand -hex 24
@@ -81,6 +82,13 @@ fi
 
 cleanup() {
     set +e
+    local pid
+    # Include a sleeper started just before a signal, even if the handler ran
+    # before its PID could be assigned to keepalive_pid.
+    for pid in $(jobs -pr); do
+        kill "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
+    done
     for role in primary replica sentinel-1 sentinel-2 sentinel-3; do
         "$engine" rm -f "${prefix}-${role}" >/dev/null 2>&1
     done
@@ -98,7 +106,9 @@ debug_logs() {
         done
     fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cat >"$tmp_dir/primary.conf" <<EOF
 port $primary_port
@@ -297,6 +307,7 @@ export TOKEN_RATE_LIMIT_SENTINEL_PRIMARY_CONTAINER="${prefix}-primary"
 export TOKEN_RATE_LIMIT_SENTINEL_REPLICA_CONTAINER="${prefix}-replica"
 export TOKEN_RATE_LIMIT_SENTINEL_SENTINEL_CONTAINER="${prefix}-sentinel-1"
 export TOKEN_RATE_LIMIT_SENTINEL_SENTINEL_PORT="$sentinel_1_port"
+export TOKEN_RATE_LIMIT_SENTINEL_PRIMARY_PORT="$primary_port"
 export TOKEN_RATE_LIMIT_SENTINEL_REPLICA_PORT="$replica_port"
 
 if [[ -n "$env_file" ]]; then
@@ -323,5 +334,7 @@ fi
 echo "Sentinel topology ready: $product $image"
 while :; do
     sleep 3600 &
-    wait $!
+    keepalive_pid=$!
+    wait "$keepalive_pid"
+    keepalive_pid=""
 done

@@ -46,10 +46,8 @@ jobs:
             registry: upstream
             image: docker.io/library/redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
           - product: valkey
-            # Fork fallback until the repository provides REDHAT_PULL_SECRET.
-            # The exact Red Hat image remains the release qualification target.
-            registry: upstream
-            image: ghcr.io/valkey-io/valkey@sha256:4436c94fc34ce4af0354b9379d433a1f258998fb955f995c89822f98c14a8cab
+            registry: redhat
+            image: registry.redhat.io/rhel10/valkey-8@sha256:5929be16ac020c4851d8dc1f5ead6d48c6da066a9a74349711186925ebd553b9
 
     env:
       SENTINEL_PRODUCT: ${{ matrix.product }}
@@ -62,6 +60,9 @@ jobs:
 
       - name: Set up Rust
         uses: praxis-proxy/conventions/.github/actions/setup-rust@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
+
+      - name: Check fixture signal and failure cleanup
+        run: python3 tests/integration/fixtures/token_rate_limit/test_sentinel_fixture.py
 
       - name: Configure Red Hat registry pull secret
         if: matrix.registry == 'redhat'
