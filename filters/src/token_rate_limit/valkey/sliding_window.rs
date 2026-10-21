@@ -471,10 +471,6 @@ impl ValkeySlidingWindowBackend {
     /// Called only on the admit path; two requests that race between the read
     /// and this write may both be admitted (overshoot bounded by concurrency).
     #[expect(
-        clippy::allow_attributes,
-        reason = "this stack-frame allowance must work across supported Clippy versions"
-    )]
-    #[allow(
         clippy::large_stack_frames,
         reason = "plain-command admission owns a bounded pipeline state machine"
     )]
@@ -665,10 +661,6 @@ fn next_i64(values: &mut impl Iterator<Item = redis::Value>) -> Result<i64, Back
 }
 
 #[expect(
-    clippy::allow_attributes,
-    reason = "reserve implementation intentionally keeps its backend sequence together"
-)]
-#[allow(
     clippy::too_many_lines,
     reason = "reserve keeps the read/decision/admission sequence together"
 )]
@@ -716,10 +708,6 @@ impl TokenRateLimitStateBackend for ValkeySlidingWindowBackend {
         reason = "settlement owns the bounded transaction retry and outcome flow"
     )]
     #[expect(
-        clippy::allow_attributes,
-        reason = "this stack-frame allowance must work across supported Clippy versions"
-    )]
-    #[allow(
         clippy::large_stack_frames,
         reason = "plain-command settlement owns a bounded transaction state machine"
     )]
