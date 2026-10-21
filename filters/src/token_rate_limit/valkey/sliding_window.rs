@@ -567,11 +567,15 @@ impl ValkeySlidingWindowBackend {
         &self,
         connection: &mut MultiplexedConnection,
         request: &ReconcileRequest,
+        retry: &AbortRetry,
     ) -> Result<Option<BackendSettlement>, BackendError> {
         let id = self.key_id(&request.key);
         let prefix = self.key_prefix(&id);
         let reservation = Self::reservation_key(&prefix, request.reservation_id);
-        let Some(value) = self.read_reservation(connection, &reservation).await? else {
+        let Some(value) = tokio::time::timeout(retry.remaining()?, self.read_reservation(connection, &reservation))
+            .await
+            .map_err(|_elapsed| BackendError::Unavailable("Valkey operation deadline exceeded".into()))??
+        else {
             unwatch(connection).await?;
             return Ok(Some(BackendSettlement::Noop));
         };
@@ -590,9 +594,9 @@ impl ValkeySlidingWindowBackend {
             request.now_ms,
             delta,
         );
-        let executed: Option<()> = pipe
-            .query_async(connection)
+        let executed: Option<()> = tokio::time::timeout(retry.remaining()?, pipe.query_async(connection))
             .await
+            .map_err(|_elapsed| BackendError::Unconfirmed("Valkey operation deadline exceeded".into()))?
             .map_err(|error| command_error(&error))?;
         Ok(executed.map(|()| BackendSettlement::Applied {
             actual,
@@ -731,18 +735,7 @@ impl TokenRateLimitStateBackend for ValkeySlidingWindowBackend {
                 retry.pause().await?;
                 continue;
             }
-            let outcome = match tokio::time::timeout(
-                retry.remaining()?,
-                self.reconcile_attempt(transaction.inner(), &request),
-            )
-            .await
-            {
-                Ok(outcome) => outcome?,
-                Err(_elapsed) => {
-                    drop(transaction);
-                    return Err(BackendError::Unconfirmed("Valkey operation deadline exceeded".into()));
-                },
-            };
+            let outcome = self.reconcile_attempt(transaction.inner(), &request, &retry).await?;
             let remaining = match retry.remaining() {
                 Ok(remaining) => remaining,
                 Err(error) => {
