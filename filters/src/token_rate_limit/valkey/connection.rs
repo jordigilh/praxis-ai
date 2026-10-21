@@ -202,7 +202,7 @@ impl ValkeyConnection {
     /// Returns [`BackendError::Unavailable`] when `url` is not a Valkey URL.
     #[cfg(test)]
     pub(in crate::token_rate_limit) fn new(url: String) -> Result<Self, BackendError> {
-        Self::standalone_with_timeouts_and_name(url, ValkeyTimeouts::default(), "valkey")
+        Self::standalone_with_timeouts_and_name(url, ValkeyTimeouts::default(), "shared_kv")
     }
 
     /// Open a lazy standalone client with a selector label for telemetry.
@@ -1076,10 +1076,9 @@ fn sentinel_discovery_phase(generation: u64, recovery_pending: bool) -> &'static
 }
 
 /// Record one bounded Sentinel discovery attempt.
-fn record_sentinel_discovery(backend: &'static str, phase: &'static str, result: &'static str) {
+fn record_sentinel_discovery(_backend: &'static str, phase: &'static str, result: &'static str) {
     counter!(
         METRIC_SENTINEL_DISCOVERY,
-        "backend" => backend,
         "phase" => phase,
         "result" => result,
     )
@@ -1089,8 +1088,8 @@ fn record_sentinel_discovery(backend: &'static str, phase: &'static str, result:
 /// Record one generation-fenced Sentinel recovery outcome. `recovered` means
 /// a writable connection was returned after invalidation; it does not prove a
 /// Sentinel promotion occurred.
-fn record_sentinel_failover(backend: &'static str, outcome: &'static str) {
-    counter!(METRIC_SENTINEL_FAILOVER, "backend" => backend, "outcome" => outcome).increment(1);
+fn record_sentinel_failover(_backend: &'static str, outcome: &'static str) {
+    counter!(METRIC_SENTINEL_FAILOVER, "outcome" => outcome).increment(1);
 }
 
 /// Close one pending failover attempt with a bounded failure sample.
@@ -1778,9 +1777,18 @@ mod tests {
             topology: Some(BackendTopology::Standalone("redis://127.0.0.1:6379".into())),
             ..BackendConfig::default()
         };
-        let connection = ValkeyConnection::from_backend_config(&standalone, "valkey")
+        let connection = ValkeyConnection::from_backend_config(&standalone, "shared_kv")
             .expect("standalone backend construction should use the process lookup wrapper");
-        assert_eq!(connection.backend_name(), "valkey");
+        assert_eq!(connection.backend_name(), "shared_kv");
+
+        let redis = BackendConfig {
+            kind: BackendKind::Redis,
+            topology: Some(BackendTopology::Standalone("redis://127.0.0.1:6379".into())),
+            ..BackendConfig::default()
+        };
+        let redis_connection = ValkeyConnection::from_backend_config(&redis, "shared_kv")
+            .expect("Redis backend construction should use the shared KV telemetry family");
+        assert_eq!(redis_connection.backend_name(), "shared_kv");
 
         let missing_topology = ValkeyConnection::from_backend_config(&BackendConfig::default(), "valkey");
         assert!(missing_topology.is_err(), "network backends require a topology");
@@ -2588,11 +2596,11 @@ mod tests {
         };
         assert_eq!(
             labels_for(super::METRIC_SENTINEL_DISCOVERY),
-            Some(vec!["backend".into(), "phase".into(), "result".into()])
+            Some(vec!["phase".into(), "result".into()])
         );
         assert_eq!(
             labels_for(super::METRIC_SENTINEL_FAILOVER),
-            Some(vec!["backend".into(), "outcome".into()])
+            Some(vec!["outcome".into()])
         );
     }
 

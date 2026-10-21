@@ -110,6 +110,8 @@ mutation was dispatched and `unconfirmed` when a dispatched operation may have
 committed. Fail-open admissions are not included in
 `praxis_trl_backend_errors_total`, which is reserved for failed reservations
 that fail closed with 503, plus reconciliation failures.
+The bounded `backend` vocabulary is `memory` or `shared_kv`; Redis and Valkey
+both use `shared_kv`.
 
 The span is created at admission and dropped when the response body ends,
 so its lifetime covers the streamed response. It does not contain the
@@ -119,9 +121,9 @@ response processing; its success or failure is exposed through metrics and
 accounting logs rather than extending the span further.
 
 Sentinel transport lifecycle is also metrics-only, not additional request-span
-attributes. `praxis_trl_sentinel_discovery_total{backend,phase,result}` records
+attributes. `praxis_trl_sentinel_discovery_total{phase,result}` records
 bounded initial discovery and generation-fenced rediscovery outcomes;
-`praxis_trl_sentinel_failover_total{backend,outcome}` records proxy-side
+`praxis_trl_sentinel_failover_total{outcome}` records proxy-side
 recovery after invalidation. Their labels are fixed vocabularies and contain no
 endpoint, service-name, credential, subject, or bucket-key values. A
 `recovered` failover sample means that the proxy obtained a writable

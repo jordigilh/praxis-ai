@@ -282,8 +282,7 @@ fn build_backend_resource(backend: &BackendConfig) -> Result<BackendResource, Fi
         BackendKind::Memory => Ok(BackendResource::Memory),
         BackendKind::Redis | BackendKind::Valkey => {
             let backend_name = match backend.kind {
-                BackendKind::Redis => "redis",
-                BackendKind::Valkey => "valkey",
+                BackendKind::Redis | BackendKind::Valkey => "shared_kv",
                 BackendKind::Memory => unreachable!("network backend name requested for memory"),
             };
             let namespace = backend
