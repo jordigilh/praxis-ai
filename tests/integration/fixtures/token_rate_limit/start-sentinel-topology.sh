@@ -17,6 +17,8 @@ debug=${TOKEN_RATE_LIMIT_SENTINEL_DEBUG:-}
 replication_health_test=${TOKEN_RATE_LIMIT_SENTINEL_REPLICATION_HEALTH_TEST:-}
 on_failure=${TOKEN_RATE_LIMIT_SENTINEL_ON_FAILURE:-}
 keepalive_pid=""
+fixture_owner_pid=${BASHPID:-$$}
+cleanup_started=0
 
 random_password() {
     openssl rand -hex 24
@@ -81,6 +83,13 @@ else
 fi
 
 cleanup() {
+    # Subshells can inherit EXIT handling while a signal races with a fork.
+    # Only the original shell owns the topology, and teardown runs once.
+    if [[ ${BASHPID:-$$} != "$fixture_owner_pid" || ${BASH_SUBSHELL:-0} != 0 ]] || ((cleanup_started)); then
+        return 0
+    fi
+    cleanup_started=1
+    trap - EXIT
     set +e
     local pid
     # Include a sleeper started just before a signal, even if the handler ran

@@ -14,6 +14,9 @@ import unittest
 
 
 FIXTURE = Path(__file__).with_name("start-sentinel-topology.sh")
+# Test-only process budget; production discovery/operation deadlines do not
+# change when an overloaded developer host needs more shell-launch headroom.
+TEST_TIMEOUT = float(os.environ.get("TOKEN_RATE_LIMIT_FIXTURE_TEST_TIMEOUT", "30"))
 FAKE_ENGINE = """#!/usr/bin/env bash
 set -eu
 case "$1" in
@@ -61,15 +64,21 @@ class SentinelFixtureLifecycle(unittest.TestCase):
                 if stop_signal is not None:
                     with selectors.DefaultSelector() as selector:
                         selector.register(process.stdout, selectors.EVENT_READ)
-                        while True:
-                            self.assertTrue(selector.select(timeout=10), "fixture must become ready within 10s")
-                            line = process.stdout.readline()
-                            self.assertTrue(line, "fixture must stay alive until signalled")
-                            if "Sentinel topology ready:" in line:
-                                break
+                        ready = b""
+                        while b"Sentinel topology ready:" not in ready:
+                            self.assertTrue(
+                                selector.select(timeout=TEST_TIMEOUT),
+                                f"fixture must become ready within {TEST_TIMEOUT}s",
+                            )
+                            # Read the descriptor directly: TextIO.readline can
+                            # buffer the readiness line while select sees no
+                            # remaining descriptor bytes and waits forever.
+                            chunk = os.read(process.stdout.fileno(), 4096)
+                            self.assertTrue(chunk, "fixture must stay alive until signalled")
+                            ready += chunk
                     self.assertTrue(env_file.exists(), "ready fixture must retain its environment file")
                     process.send_signal(stop_signal)
-                _, stderr = process.communicate(timeout=10)
+                _, stderr = process.communicate(timeout=TEST_TIMEOUT)
             finally:
                 # Kill only this test's process group if a failing fixture left
                 # a child holding its output pipes open.
@@ -96,6 +105,37 @@ class SentinelFixtureLifecycle(unittest.TestCase):
 
     def test_replica_ahead_of_primary_snapshot_is_ready(self):
         self.run_fixture(replica_offset=43)
+
+    def test_cleanup_is_owned_by_parent_and_is_idempotent(self):
+        source = FIXTURE.read_text()
+        start = source.index("cleanup() {")
+        cleanup = source[start:source.index("\n}\n", start) + 2]
+        with tempfile.TemporaryDirectory(prefix="sentinel-cleanup-owner-") as directory:
+            root = Path(directory)
+            engine = root / "engine"
+            engine.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$FIXTURE_ENGINE_LOG"\n')
+            engine.chmod(0o700)
+            data = root / "data"
+            data.mkdir()
+            env_file = root / "fixture.env"
+            env_file.touch()
+            log = root / "engine.log"
+            environment = os.environ.copy()
+            environment.update(
+                FIXTURE_ENGINE=str(engine), FIXTURE_ENGINE_LOG=str(log),
+                FIXTURE_DATA=str(data), FIXTURE_ENV_FILE=str(env_file),
+            )
+            program = (
+                'set -Eeuo pipefail\nfixture_owner_pid=${BASHPID:-$$}\ncleanup_started=0\n'
+                'engine="$FIXTURE_ENGINE"\nprefix=owned-fixture\n'
+                'tmp_dir="$FIXTURE_DATA"\nenv_file="$FIXTURE_ENV_FILE"\nenv_file_written=1\n'
+                + cleanup + '\n(cleanup)\n'
+                '[[ -d "$tmp_dir" && -e "$env_file" ]] || exit 12\ncleanup\ncleanup\n'
+            )
+            subprocess.run(["bash", "-c", program], env=environment, check=True, capture_output=True)
+            self.assertEqual(len(log.read_text().splitlines()), 5, "only the parent may clean, exactly once")
+            self.assertFalse(data.exists(), "parent cleanup must remove its data directory")
+            self.assertFalse(env_file.exists(), "parent cleanup must remove its environment file")
 
     def test_standalone_contracts_require_fixture_credentials(self):
         environment = {"PATH": os.environ["PATH"]}
