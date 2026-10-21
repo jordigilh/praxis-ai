@@ -1033,12 +1033,16 @@ impl ValkeyConnection {
         connection_config: &redis::AsyncConnectionConfig,
     ) -> Result<(redis::Client, MultiplexedConnection), BackendError> {
         loop {
-            for endpoint in &sentinel.endpoints {
+            for (index, endpoint) in sentinel.endpoints.iter().enumerate() {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     return Err(BackendError::Unavailable("Sentinel TLS discovery timeout".into()));
                 }
-                let endpoint_deadline = Instant::now() + sentinel_endpoint_timeout(self.timeouts, remaining);
+                // TLS discovery includes two verified connections and ROLE.
+                // Share the enclosing budget fairly instead of applying the
+                // plain helper's 500ms cap to this multi-hop exchange.
+                let endpoints_left = u32::try_from(sentinel.endpoints.len() - index).unwrap_or(u32::MAX);
+                let endpoint_deadline = Instant::now() + remaining / endpoints_left;
                 let client = tls_client(
                     endpoint.clone(),
                     sentinel.tls_certificates.as_ref(),
@@ -2111,7 +2115,7 @@ pub(super) mod tests {
             ValkeyTimeouts {
                 connect: Duration::from_secs(1),
                 operation: Duration::from_secs(1),
-                discovery: Duration::from_secs(2),
+                discovery: Duration::from_secs(5),
             },
             "valkey",
         )
@@ -2309,7 +2313,7 @@ pub(super) mod tests {
             ValkeyTimeouts {
                 connect: Duration::from_secs(1),
                 operation: Duration::from_secs(1),
-                discovery: Duration::from_secs(2),
+                discovery: Duration::from_secs(5),
             },
             "shared_kv",
         )
