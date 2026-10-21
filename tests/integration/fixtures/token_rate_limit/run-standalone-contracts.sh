@@ -11,8 +11,8 @@ set -Eeuo pipefail
 : "${TOKEN_RATE_LIMIT_SENTINEL_ENGINE:?fixture engine is required}"
 : "${TOKEN_RATE_LIMIT_SENTINEL_CONTAINER_PREFIX:?fixture container ownership is required}"
 
-# Standalone fault tests deliberately pause the data node. They must not be
-# reconfigured by Sentinel while checking lost-reply and timeout behavior.
+# Keep fixed-endpoint contracts independent from failover. The HA contracts
+# run separately against fresh topologies with all three Sentinels active.
 for index in 1 2 3; do
     "$TOKEN_RATE_LIMIT_SENTINEL_ENGINE" stop \
         "${TOKEN_RATE_LIMIT_SENTINEL_CONTAINER_PREFIX}-sentinel-${index}" >/dev/null

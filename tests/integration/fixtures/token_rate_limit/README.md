@@ -43,9 +43,9 @@ either wire-compatible product. Its proxy binary includes `basic-auth-filter`
 as well as `token-rate-limit-filter` for the authenticated-subject contract.
 These backend-backed results are compatibility evidence, not hermetic unit
 coverage.
-The standalone phase stops only its own Sentinels before running fault tests,
-because those tests intentionally pause the data node. Each HA phase starts a
-fresh topology with all three Sentinels active.
+The standalone phase stops only its own Sentinels and removes Sentinel endpoint
+variables so the fixed-endpoint contracts cannot depend on failover. Each HA
+phase starts a fresh topology with all three Sentinels active.
 
 Set `SENTINEL_DEAD_ENDPOINT=redis://127.0.0.1:1` to prepend an unavailable
 Sentinel endpoint. The real client must skip it and discover through the

@@ -3151,8 +3151,7 @@ pub(super) mod tests {
         let Some(url) = valkey_url() else {
             return;
         };
-        let (proxy_addr, wedged) = spawn_wedgeable_proxy(&url).await;
-        let connection = ValkeyConnection::new(format!("redis://{proxy_addr}")).unwrap();
+        let (connection, wedged) = spawn_wedgeable_proxy(&url).await;
         let mut pipe = redis::pipe();
         pipe.cmd("PING");
         let (_pong,): (String,) = connection.pipeline(&pipe).await.unwrap();
@@ -3176,8 +3175,7 @@ pub(super) mod tests {
         let Some(url) = valkey_url() else {
             return;
         };
-        let (proxy_addr, wedged) = spawn_wedgeable_proxy(&url).await;
-        let connection = ValkeyConnection::new(format!("redis://{proxy_addr}")).unwrap();
+        let (connection, wedged) = spawn_wedgeable_proxy(&url).await;
         let key = format!("praxis:test:ambiguous:{}", std::process::id());
         let mut clear = redis::pipe();
         clear.cmd("DEL").arg(&key).ignore();
@@ -3245,11 +3243,19 @@ pub(super) mod tests {
     /// makes every open connection stop relaying upstream replies back
     /// to the client -- the bytes are still read off the wire (so the
     /// upstream Valkey itself never blocks or errors), just dropped.
-    async fn spawn_wedgeable_proxy(upstream: &str) -> (std::net::SocketAddr, Arc<AtomicBool>) {
-        let upstream = upstream
-            .strip_prefix("redis://")
-            .expect("test fixture: TOKEN_RATE_LIMIT_VALKEY_URL must be a bare redis://host:port URL")
-            .to_owned();
+    #[expect(
+        clippy::too_many_lines,
+        reason = "fault-proxy startup preserves authenticated connection settings"
+    )]
+    async fn spawn_wedgeable_proxy(upstream: &str) -> (ValkeyConnection, Arc<AtomicBool>) {
+        let info = redis::IntoConnectionInfo::into_connection_info(upstream).expect("parse test backend URL");
+        let upstream = match info.addr() {
+            redis::ConnectionAddr::Tcp(host, port) => super::primary_url(host, *port)
+                .strip_prefix("redis://")
+                .expect("generated plain endpoint")
+                .to_owned(),
+            _ => panic!("fault relay requires a plain TCP backend"),
+        };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = listener.local_addr().unwrap();
         let wedged = Arc::new(AtomicBool::new(false));
@@ -3265,7 +3271,14 @@ pub(super) mod tests {
             }
         });
 
-        (proxy_addr, wedged)
+        let client = redis::Client::open(info.set_addr(redis::ConnectionAddr::Tcp(
+            proxy_addr.ip().to_string(),
+            proxy_addr.port(),
+        )))
+        .expect("build authenticated fault-proxy client");
+        let mut connection = ValkeyConnection::new(format!("redis://{proxy_addr}")).unwrap();
+        connection.source = Arc::new(super::ConnectionSource::Standalone(client));
+        (connection, wedged)
     }
 
     /// One [`spawn_wedgeable_proxy`] connection's relay loop: client
