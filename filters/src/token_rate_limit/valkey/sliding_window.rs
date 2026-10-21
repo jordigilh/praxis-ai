@@ -53,7 +53,7 @@ use super::{
         ledger::{Budget, DenialReason},
     },
     RuleTelemetry, ValkeyConnection, accounting_config_key, amount,
-    connection::{AbortRetry, command_error, unwatch},
+    connection::{AbortRetry, unwatch},
     count, ensure_accounting_config, extend_shared_ttl, key_hash, parse_reservation, sliding_window_config_fingerprint,
     window::{BucketRange, bucket_index, bucket_ms, retry_after_ms},
 };
@@ -330,7 +330,7 @@ impl ValkeySlidingWindowBackend {
     async fn read_window(&self, id: &str, now_ms: u64) -> Result<WindowReads, BackendError> {
         let prefix = self.key_prefix(id);
         let pipe = self.build_read_pipeline(&prefix, id, now_ms);
-        let reply: Vec<redis::Value> = self.valkey.pipeline(&pipe).await?;
+        let reply: Vec<redis::Value> = Box::pin(self.valkey.pipeline(&pipe)).await?;
         self.parse_read_reply(reply)
     }
 
@@ -470,22 +470,18 @@ impl ValkeySlidingWindowBackend {
     /// Charge the estimate and record the reservation atomically.
     /// Called only on the admit path; two requests that race between the read
     /// and this write may both be admitted (overshoot bounded by concurrency).
-    #[expect(
-        clippy::large_stack_frames,
-        reason = "plain-command admission owns a bounded pipeline state machine"
-    )]
     async fn admit(&self, key_id: &str, request: &ReserveRequest) -> Result<u64, BackendError> {
         let prefix = self.key_prefix(key_id);
         let mut seq = redis::pipe();
         seq.cmd("INCR").arg(self.seq_key());
-        let (id,): (i64,) = self.valkey.pipeline(&seq).await?;
+        let (id,): (i64,) = Box::pin(self.valkey.pipeline(&seq)).await?;
         let id = amount(id)?;
         let delta = i64::try_from(request.estimate).unwrap_or(i64::MAX);
         let mut pipe = redis::pipe();
         pipe.atomic();
         self.add_usage_delta(&mut pipe, &prefix, request.now_ms, delta);
         self.record_active_reservation(&mut pipe, key_id, id, request);
-        let () = self.valkey.pipeline(&pipe).await?;
+        let () = Box::pin(self.valkey.pipeline(&pipe)).await?;
         Ok(id)
     }
 
@@ -519,7 +515,7 @@ impl ValkeySlidingWindowBackend {
         let (value,): (Option<String>,) = read
             .query_async(connection)
             .await
-            .map_err(|error| command_error(&error))?;
+            .map_err(|error| self.valkey.transaction_command_error(&error))?;
         Ok(value)
     }
 
@@ -572,7 +568,9 @@ impl ValkeySlidingWindowBackend {
             .await
             .map_err(|_elapsed| BackendError::Unavailable("Valkey operation deadline exceeded".into()))??
         else {
-            unwatch(connection).await?;
+            tokio::time::timeout(retry.remaining()?, unwatch(connection))
+                .await
+                .map_err(|_elapsed| BackendError::Unavailable("Valkey operation deadline exceeded".into()))??;
             return Ok(Some(BackendSettlement::Noop));
         };
         let (estimate, admitted_at_ms) = parse_reservation(&value)?;
@@ -593,7 +591,7 @@ impl ValkeySlidingWindowBackend {
         let executed: Option<()> = tokio::time::timeout(retry.remaining()?, pipe.query_async(connection))
             .await
             .map_err(|_elapsed| BackendError::Unconfirmed("Valkey operation deadline exceeded".into()))?
-            .map_err(|error| command_error(&error))?;
+            .map_err(|error| self.valkey.transaction_command_error(&error))?;
         Ok(executed.map(|()| BackendSettlement::Applied {
             actual,
             refund: estimate.saturating_sub(actual),
@@ -660,10 +658,6 @@ fn next_i64(values: &mut impl Iterator<Item = redis::Value>) -> Result<i64, Back
     redis::from_redis_value::<i64>(value).map_err(|_error| BackendError::InvalidResponse)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "reserve keeps the read/decision/admission sequence together"
-)]
 #[async_trait]
 impl TokenRateLimitStateBackend for ValkeySlidingWindowBackend {
     async fn reserve(&self, request: ReserveRequest) -> Result<BackendReserve, BackendError> {
@@ -703,23 +697,15 @@ impl TokenRateLimitStateBackend for ValkeySlidingWindowBackend {
         clippy::significant_drop_tightening,
         reason = "transaction.finish() consumes the connection after the borrowed attempt"
     )]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "settlement owns the bounded transaction retry and outcome flow"
-    )]
-    #[expect(
-        clippy::large_stack_frames,
-        reason = "plain-command settlement owns a bounded transaction state machine"
-    )]
     async fn reconcile(&self, request: ReconcileRequest) -> Result<BackendSettlement, BackendError> {
         Box::pin(self.ensure_accounting_config()).await?;
         let mut retry = AbortRetry::start(self.valkey.operation_deadline());
         loop {
-            let mut transaction = tokio::time::timeout(retry.remaining()?, self.valkey.transaction())
+            let mut transaction = Box::pin(tokio::time::timeout(retry.remaining()?, self.valkey.transaction()))
                 .await
                 .map_err(|_elapsed| BackendError::Unavailable("Valkey operation deadline exceeded".into()))??;
             if !transaction.is_current() {
-                drop(transaction);
+                transaction.discard();
                 retry.pause().await?;
                 continue;
             }
@@ -728,7 +714,7 @@ impl TokenRateLimitStateBackend for ValkeySlidingWindowBackend {
                 Ok(remaining) => remaining,
                 Err(error) => {
                     if let Some(settlement) = outcome {
-                        drop(transaction);
+                        transaction.discard();
                         return Ok(settlement);
                     }
                     drop(transaction);
@@ -842,7 +828,7 @@ mod tests {
     async fn pttl(backend: &ValkeySlidingWindowBackend, key: &str) -> i64 {
         let mut pipe = redis::pipe();
         pipe.cmd("PTTL").arg(key);
-        let (ttl,): (i64,) = backend.valkey.pipeline(&pipe).await.unwrap();
+        let (ttl,): (i64,) = Box::pin(backend.valkey.pipeline(&pipe)).await.unwrap();
         ttl
     }
 
@@ -897,7 +883,7 @@ mod tests {
     async fn counter_value(backend: &ValkeySlidingWindowBackend, key: &str) -> i64 {
         let mut pipe = redis::pipe();
         pipe.cmd("GET").arg(key);
-        let (value,): (i64,) = backend.valkey.pipeline(&pipe).await.unwrap();
+        let (value,): (i64,) = Box::pin(backend.valkey.pipeline(&pipe)).await.unwrap();
         value
     }
 
@@ -1006,7 +992,7 @@ mod tests {
             "both budgets name the same counter"
         );
         assert_eq!(
-            counter_value(&backend, &counter).await,
+            Box::pin(counter_value(&backend, &counter)).await,
             10,
             "the shared counter is charged once, not once per budget"
         );
@@ -1164,7 +1150,7 @@ mod tests {
         };
         let mut shorten = redis::pipe();
         shorten.cmd("PEXPIRE").arg(backend.keys_key()).arg(50).ignore();
-        let () = backend.valkey.pipeline(&shorten).await.unwrap();
+        let () = Box::pin(backend.valkey.pipeline(&shorten)).await.unwrap();
         let applied = BackendSettlement::Applied {
             actual: 40,
             refund: 20,
@@ -1216,7 +1202,7 @@ mod tests {
         let id = backend.key_id("alice");
         let prefix = backend.key_prefix(&id);
         let reservation = ValkeySlidingWindowBackend::reservation_key(&prefix, reservation_id);
-        let mut transaction = backend.valkey.transaction().await.unwrap();
+        let mut transaction = Box::pin(backend.valkey.transaction()).await.unwrap();
         let value = backend
             .read_reservation(transaction.inner(), &reservation)
             .await
@@ -1230,14 +1216,14 @@ mod tests {
             .arg("PX")
             .arg(5_000)
             .ignore();
-        let () = backend.valkey.pipeline(&concurrent).await.unwrap();
+        let () = Box::pin(backend.valkey.pipeline(&concurrent)).await.unwrap();
         let member = format!("{id}|{reservation_id}");
         let pipe = backend.settlement_pipeline(&id, &prefix, &reservation, &member, now, now, 40);
         let executed: Option<()> = pipe.query_async(transaction.inner()).await.unwrap();
         assert!(executed.is_none(), "a changed reservation aborts the whole settlement");
         transaction.finish(VALKEY_TIMEOUT).await;
         assert_eq!(
-            counter_value(&backend, &backend.usage_key("alice", 60_000, now)).await,
+            Box::pin(counter_value(&backend, &backend.usage_key("alice", 60_000, now))).await,
             10
         );
         assert_eq!(
@@ -1252,7 +1238,7 @@ mod tests {
             }
         );
         assert_eq!(
-            counter_value(&backend, &backend.usage_key("alice", 60_000, now)).await,
+            Box::pin(counter_value(&backend, &backend.usage_key("alice", 60_000, now))).await,
             50
         );
     }
@@ -1329,7 +1315,7 @@ mod tests {
         let bucket = backend.usage_key("alice", 60_000, now);
         let mut pipe = redis::pipe();
         pipe.cmd("DEL").arg(&bucket).ignore();
-        let () = backend.valkey.pipeline(&pipe).await.unwrap();
+        let () = Box::pin(backend.valkey.pipeline(&pipe)).await.unwrap();
         let _ = backend
             .reconcile(reconcile("alice", reservation_id, 10, now + 1))
             .await
@@ -1337,7 +1323,7 @@ mod tests {
         let mut pipe = redis::pipe();
         pipe.cmd("GET").arg(&bucket);
         pipe.cmd("PTTL").arg(&bucket);
-        let (value, ttl): (i64, i64) = backend.valkey.pipeline(&pipe).await.unwrap();
+        let (value, ttl): (i64, i64) = Box::pin(backend.valkey.pipeline(&pipe)).await.unwrap();
         assert_eq!(value, -40, "the counter was recreated by the delta");
         assert!(ttl > 0, "a recreated counter must carry a TTL, got {ttl}");
         let BackendReserve::Admitted { remaining, .. } = backend.reserve(reserve("alice", 1, now + 2)).await.unwrap()

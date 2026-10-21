@@ -182,10 +182,18 @@ fn sentinel_fixture_admits_through_the_real_proxy_pipeline() {
 #[test]
 #[ignore = "requires the Sentinel fixture topology"]
 fn sentinel_fixture_skips_a_dead_first_sentinel_endpoint() {
-    if env::var("TOKEN_RATE_LIMIT_SENTINEL_DEAD_ENDPOINT").is_err() {
+    let Some(dead) = env::var("TOKEN_RATE_LIMIT_SENTINEL_DEAD_ENDPOINT")
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
         eprintln!("skipping: TOKEN_RATE_LIMIT_SENTINEL_DEAD_ENDPOINT not set");
         return;
-    }
+    };
+    assert!(
+        env::var("TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS")
+            .is_ok_and(|value| value.split(',').next() == Some(dead.as_str())),
+        "the fixture must place the dead Sentinel first in the endpoint list"
+    );
     let backend = StatefulCapturingBackend::new(vec![(200, OPENAI_RESPONSE_BODY.to_owned())]).start_with_shutdown();
     let config = fixture_config(free_port(), backend.port());
     let proxy = start_proxy(&config);

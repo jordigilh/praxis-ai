@@ -667,6 +667,21 @@ fn from_config_rejects_mixed_standalone_and_sentinel_topology() {
 }
 
 #[test]
+fn from_config_rejects_a_missing_network_topology_during_parsing() {
+    let yaml = single_rule_yaml_with(
+        "backend:\n  kind: valkey",
+        "algorithm: sliding_window\nwindow: 1h\ncapacity: 100\nreserved_tokens: 5",
+    );
+    let Err(err) = TokenRateLimitFilter::from_config(&yaml) else {
+        panic!("network backends must declare a topology")
+    };
+    assert!(
+        err.to_string().contains("backend.url or backend.sentinel is required"),
+        "got: {err}"
+    );
+}
+
+#[test]
 fn from_config_rejects_insecure_tls_configuration() {
     let yaml = single_rule_yaml_with(
         "backend:\n  kind: valkey\n  sentinel:\n    endpoints: [redis://127.0.0.1:26379]\n    service_name: mymaster\n    tls_insecure: true",
@@ -1806,7 +1821,7 @@ async fn valkey_unmarked_v2_state_fails_closed_with_503() {
         .arg("legacy-key")
         .ignore();
     pipe.cmd("PEXPIRE").arg(&state_index).arg(60_000).ignore();
-    let _: () = connection.pipeline(&pipe).await.unwrap();
+    let _: () = Box::pin(connection.pipeline(&pipe)).await.unwrap();
 
     let filter = TokenRateLimitFilter::from_config(&single_rule_valkey_yaml(
         "algorithm: sliding_window\nwindow: 1h\ncapacity: 5\nreserved_tokens: 1",
@@ -1849,7 +1864,7 @@ async fn valkey_unmarked_v2_quota_state_without_index_fails_closed_with_503() {
     let mut pipe = redis::pipe();
     pipe.cmd("SET").arg(marker_key).arg("v3:legacy-test").ignore();
     pipe.cmd("SET").arg(&usage_key).arg(5).arg("PX").arg(600_000).ignore();
-    let () = connection.pipeline(&pipe).await.unwrap();
+    let () = Box::pin(connection.pipeline(&pipe)).await.unwrap();
 
     let filter = TokenRateLimitFilter::from_config(&single_rule_valkey_yaml(
         "algorithm: sliding_window\nwindow: 1h\ncapacity: 5\nreserved_tokens: 1",

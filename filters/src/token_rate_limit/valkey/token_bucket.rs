@@ -74,7 +74,7 @@ use super::{
         token_bucket_ledger,
     },
     RuleTelemetry, ValkeyConnection, accounting_config_key, amount,
-    connection::{AbortRetry, command_error, unwatch},
+    connection::{AbortRetry, unwatch},
     count, ensure_accounting_config, extend_shared_ttl, key_hash, parse_reservation, token_bucket_config_fingerprint,
 };
 
@@ -400,12 +400,7 @@ impl ValkeyTokenBucketBackend {
         reason = "transaction.finish() consumes the connection; the lint misidentifies the borrow across .await as a retained drop"
     )]
     #[expect(
-        clippy::allow_attributes,
-        reason = "reserve retry state needs bounded backend lint allowances"
-    )]
-    #[allow(
         clippy::too_many_lines,
-        clippy::large_stack_frames,
         reason = "reserve retry loop keeps transaction lifetime and deadline handling together"
     )]
     async fn reserve_with<H, F>(&self, request: ReserveRequest, mut between: H) -> Result<BackendReserve, BackendError>
@@ -418,11 +413,11 @@ impl ValkeyTokenBucketBackend {
         let mut attempt = 0_u32;
         loop {
             attempt = attempt.saturating_add(1);
-            let mut transaction = tokio::time::timeout(retry.remaining()?, self.valkey.transaction())
+            let mut transaction = Box::pin(tokio::time::timeout(retry.remaining()?, self.valkey.transaction()))
                 .await
                 .map_err(|_elapsed| BackendError::Unavailable("Valkey operation deadline exceeded".into()))??;
             if !transaction.is_current() {
-                drop(transaction);
+                transaction.discard();
                 retry.pause().await?;
                 continue;
             }
@@ -442,7 +437,7 @@ impl ValkeyTokenBucketBackend {
                 Ok(remaining) => remaining,
                 Err(error) => {
                     if let Some(outcome) = outcome {
-                        drop(transaction);
+                        transaction.discard();
                         return Ok(outcome);
                     }
                     drop(transaction);
@@ -483,7 +478,7 @@ impl ValkeyTokenBucketBackend {
         let executed: Option<()> = pipe
             .query_async(connection)
             .await
-            .map_err(|error| command_error(&error))?;
+            .map_err(|error| self.valkey.transaction_command_error(&error))?;
         Ok(executed.map(|()| self.admitted(&reads, tokens_after, request.estimate)))
     }
 
@@ -512,7 +507,7 @@ impl ValkeyTokenBucketBackend {
         let reply: redis::Value = pipe
             .query_async(connection)
             .await
-            .map_err(|error| command_error(&error))?;
+            .map_err(|error| self.valkey.transaction_command_error(&error))?;
         let (fields, active, keys, score, reservation_id): ReserveReply =
             redis::from_redis_value(reply).map_err(|_error| BackendError::InvalidResponse)?;
         Ok(BucketReads {
@@ -640,7 +635,9 @@ impl ValkeyTokenBucketBackend {
             .await
             .map_err(|_elapsed| BackendError::Unavailable("Valkey operation deadline exceeded".into()))??;
         let Some(value) = value else {
-            unwatch(connection).await?;
+            tokio::time::timeout(retry.remaining()?, unwatch(connection))
+                .await
+                .map_err(|_elapsed| BackendError::Unavailable("Valkey operation deadline exceeded".into()))??;
             return Ok(Some(BackendSettlement::Noop));
         };
         let (estimate, _admitted_at_ms) = parse_reservation(&value)?;
@@ -651,7 +648,7 @@ impl ValkeyTokenBucketBackend {
         let executed: Option<()> = tokio::time::timeout(retry.remaining()?, pipe.query_async(connection))
             .await
             .map_err(|_elapsed| BackendError::Unconfirmed("Valkey operation deadline exceeded".into()))?
-            .map_err(|error| command_error(&error))?;
+            .map_err(|error| self.valkey.transaction_command_error(&error))?;
         Ok(executed.map(|()| BackendSettlement::Applied {
             actual,
             refund,
@@ -676,7 +673,7 @@ impl ValkeyTokenBucketBackend {
         let reply: redis::Value = read
             .query_async(connection)
             .await
-            .map_err(|error| command_error(&error))?;
+            .map_err(|error| self.valkey.transaction_command_error(&error))?;
         let (value, fields): ReconcileReply =
             redis::from_redis_value(reply).map_err(|_error| BackendError::InvalidResponse)?;
         Ok((value, self.bucket(id, fields, request.now_ms)))
@@ -708,14 +705,6 @@ impl ValkeyTokenBucketBackend {
     }
 }
 
-#[expect(
-    clippy::allow_attributes,
-    reason = "reserve implementation intentionally keeps its backend sequence together"
-)]
-#[allow(
-    clippy::too_many_lines,
-    reason = "reserve keeps the transaction and settlement sequence together"
-)]
 #[async_trait]
 impl TokenRateLimitStateBackend for ValkeyTokenBucketBackend {
     async fn reserve(&self, request: ReserveRequest) -> Result<BackendReserve, BackendError> {
@@ -730,11 +719,11 @@ impl TokenRateLimitStateBackend for ValkeyTokenBucketBackend {
         Box::pin(self.ensure_accounting_config()).await?;
         let mut retry = AbortRetry::start(self.valkey.operation_deadline());
         loop {
-            let mut transaction = tokio::time::timeout(retry.remaining()?, self.valkey.transaction())
+            let mut transaction = Box::pin(tokio::time::timeout(retry.remaining()?, self.valkey.transaction()))
                 .await
                 .map_err(|_elapsed| BackendError::Unavailable("Valkey operation deadline exceeded".into()))??;
             if !transaction.is_current() {
-                drop(transaction);
+                transaction.discard();
                 retry.pause().await?;
                 continue;
             }
@@ -743,7 +732,7 @@ impl TokenRateLimitStateBackend for ValkeyTokenBucketBackend {
                 Ok(remaining) => remaining,
                 Err(error) => {
                     if let Some(settlement) = outcome {
-                        drop(transaction);
+                        transaction.discard();
                         return Ok(settlement);
                     }
                     drop(transaction);
@@ -1015,7 +1004,7 @@ mod tests {
         };
         let mut shorten = redis::pipe();
         shorten.cmd("PEXPIRE").arg(backend.keys_key()).arg(50).ignore();
-        let () = backend.valkey.pipeline(&shorten).await.unwrap();
+        let () = Box::pin(backend.valkey.pipeline(&shorten)).await.unwrap();
         let settle = || backend.reconcile(reconcile("alice", reservation_id, 40, now));
         let applied = BackendSettlement::Applied {
             actual: 40,
@@ -1025,7 +1014,7 @@ mod tests {
         assert_eq!(settle().await.unwrap(), applied, "the unused 20 tokens are refunded");
         let mut ttl_pipe = redis::pipe();
         ttl_pipe.cmd("PTTL").arg(backend.keys_key());
-        let (keys_ttl,): (i64,) = backend.valkey.pipeline(&ttl_pipe).await.unwrap();
+        let (keys_ttl,): (i64,) = Box::pin(backend.valkey.pipeline(&ttl_pipe)).await.unwrap();
         let expected_min = i64::try_from(backend.state_ttl_ms())
             .unwrap_or(i64::MAX)
             .saturating_sub(1_000);
@@ -1116,12 +1105,12 @@ mod tests {
         ] {
             let mut pipe = redis::pipe();
             pipe.cmd("PTTL").arg(&key);
-            let (ttl,): (i64,) = backend.valkey.pipeline(&pipe).await.unwrap();
+            let (ttl,): (i64,) = Box::pin(backend.valkey.pipeline(&pipe)).await.unwrap();
             assert!(ttl > 0, "{key} must carry a TTL, got {ttl}");
         }
         let mut pipe = redis::pipe();
         pipe.cmd("PTTL").arg(backend.seq_key());
-        let (ttl,): (i64,) = backend.valkey.pipeline(&pipe).await.unwrap();
+        let (ttl,): (i64,) = Box::pin(backend.valkey.pipeline(&pipe)).await.unwrap();
         assert_eq!(ttl, -1, "the id sequence deliberately has no TTL");
     }
 
@@ -1251,7 +1240,7 @@ mod tests {
             .arg("last_refill_ms")
             .arg(now)
             .ignore();
-        let () = backend.valkey.pipeline(&pipe).await.unwrap();
+        let () = Box::pin(backend.valkey.pipeline(&pipe)).await.unwrap();
         let BackendReserve::Admitted { remaining, .. } = backend.reserve(reserve("alice", 10, now)).await.unwrap()
         else {
             panic!("a balance left by a larger capacity must still admit");
@@ -1278,13 +1267,14 @@ mod tests {
         let bucket = backend.bucket_key(&id);
         let mut seq = redis::pipe();
         seq.cmd("GET").arg(backend.seq_key());
-        let (drawn,): (u64,) = backend.valkey.pipeline(&seq).await.unwrap();
+        let (drawn,): (u64,) = Box::pin(backend.valkey.pipeline(&seq)).await.unwrap();
         let mut pipe = redis::pipe();
         pipe.cmd("EXISTS").arg(&bucket);
         pipe.cmd("EXISTS")
             .arg(ValkeyTokenBucketBackend::reservation_key(&bucket, drawn));
         pipe.cmd("ZSCORE").arg(backend.keys_key()).arg(&id);
-        let (exists, reservation, score): (i64, i64, Option<f64>) = backend.valkey.pipeline(&pipe).await.unwrap();
+        let (exists, reservation, score): (i64, i64, Option<f64>) =
+            Box::pin(backend.valkey.pipeline(&pipe)).await.unwrap();
         assert_eq!(exists, 0, "a denial must not create the bucket hash");
         assert_eq!(
             reservation, 0,
@@ -1346,7 +1336,7 @@ mod tests {
         pipe.cmd("HGET")
             .arg(backend.bucket_key(&backend.key_id(key)))
             .arg("tokens");
-        let (balance,): (f64,) = backend.valkey.pipeline(&pipe).await.unwrap();
+        let (balance,): (f64,) = Box::pin(backend.valkey.pipeline(&pipe)).await.unwrap();
         balance
     }
 
@@ -1374,7 +1364,7 @@ mod tests {
             .filter(|(_, outcome)| matches!(outcome, Ok(BackendReserve::Admitted { .. })))
             .map(|(estimate, _)| estimate)
             .sum();
-        let balance = balance(&backend, "shared").await;
+        let balance = Box::pin(balance(&backend, "shared")).await;
         #[expect(clippy::cast_precision_loss, reason = "test values are far below 2^53")]
         let expected = (capacity - admitted) as f64;
         assert!(
@@ -1402,7 +1392,7 @@ mod tests {
                 let mut pipe = redis::pipe();
                 pipe.cmd("HSET").arg(&bucket).arg("poke").arg(attempt).ignore();
                 pipe.cmd("PEXPIRE").arg(&bucket).arg(60_000).ignore();
-                let () = interfering.pipeline(&pipe).await.unwrap();
+                let () = Box::pin(interfering.pipeline(&pipe)).await.unwrap();
             }
         };
         let started = std::time::Instant::now();

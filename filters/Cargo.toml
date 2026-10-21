@@ -126,7 +126,7 @@ aws-sigv4 = { workspace = true }
 rcgen = { workspace = true }
 metrics-util = { workspace = true }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
+rustls-pki-types = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-rustls = { workspace = true }

@@ -73,13 +73,13 @@ use serde::Deserialize;
 ///   enqueues, and reconciliations abandoned after their retries. `error` is one of `unavailable`, `unconfirmed`,
 ///   `invalid_response`, or `configuration_mismatch`.
 ///
-/// - `praxis_trl_sentinel_discovery_total{backend,phase,result}`: bounded
+/// - `praxis_trl_sentinel_discovery_total{phase,result}`: bounded
 ///   Sentinel primary-discovery attempts. `phase` is `initial` or
 ///   `rediscovery`; `result` is `success`, `failure`, or `stale` when
 ///   generation fencing discards a result. This metric is emitted only for
 ///   Sentinel topologies.
 ///
-/// - `praxis_trl_sentinel_failover_total{backend,outcome}`: generation-fenced
+/// - `praxis_trl_sentinel_failover_total{outcome}`: generation-fenced
 ///   recovery after a cached connection invalidation. `outcome` is
 ///   `recovered` when a writable connection is returned or `failed` when the
 ///   bounded discovery deadline is exhausted. `recovered` does not prove that
@@ -140,8 +140,8 @@ use serde::Deserialize;
 /// The shared token bucket, by contrast, serialises admissions per key
 /// through an optimistic transaction: one key admits at most about one
 /// request per two Redis/Valkey round trips across the whole fleet, and
-/// contention shows up first as added latency, up to the 500 ms backend
-/// timeout, then as 503s. Use a non-`global` `key` for high-throughput
+/// contention shows up first as added latency, up to `backend.operation_timeout`
+/// (default 500 ms), then as 503s. Use a non-`global` `key` for high-throughput
 /// token-bucket rules so the load spreads over many buckets.
 ///
 /// During a rolling upgrade from the earlier scripted shared backend,
@@ -1131,10 +1131,10 @@ struct RawBackendConfig {
     /// Backend implementation selector.
     #[serde(default)]
     kind: BackendKind,
-    /// Standalone endpoint, if configured.
+    /// Standalone Redis/Valkey URL, if configured.
     #[serde(default)]
     url: Option<String>,
-    /// Sentinel topology, if configured.
+    /// Sentinel topology, if configured, with ordered endpoints and service credentials.
     #[serde(default)]
     sentinel: Option<RawSentinelConfig>,
     /// Shared key namespace.
@@ -1143,10 +1143,10 @@ struct RawBackendConfig {
     /// Backend failure policy.
     #[serde(default)]
     on_failure: BackendOnFailure,
-    /// Connection timeout text.
+    /// Maximum data-node connection time as a duration string; defaults to 500ms.
     #[serde(default)]
     connect_timeout: Option<String>,
-    /// Operation timeout text.
+    /// Maximum datastore operation time as a duration string; defaults to 500ms.
     #[serde(default)]
     operation_timeout: Option<String>,
 }
@@ -1171,7 +1171,7 @@ struct RawSentinelConfig {
     /// Optional data-node ACL password.
     #[serde(default)]
     redis_password: Option<String>,
-    /// Optional discovery timeout text.
+    /// Maximum Sentinel discovery time as a duration string; defaults to 5s.
     #[serde(default)]
     discovery_timeout: Option<String>,
 }
@@ -1205,6 +1205,11 @@ impl TryFrom<RawBackendConfig> for BackendConfig {
             },
             (None, None) => None,
         };
+        if matches!(raw.kind, BackendKind::Redis | BackendKind::Valkey) && topology.is_none() {
+            return Err(
+                "token_rate_limit: backend.url or backend.sentinel is required for backend.kind: redis/valkey".into(),
+            );
+        }
         Ok(Self {
             kind: raw.kind,
             topology,

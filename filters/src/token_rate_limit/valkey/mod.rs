@@ -285,22 +285,23 @@ pub(super) async fn ensure_accounting_config(
 
     let mut retry = AbortRetry::start(valkey.operation_deadline());
     loop {
-        let mut transaction = tokio::time::timeout(retry.remaining()?, valkey.transaction())
+        let mut transaction = Box::pin(tokio::time::timeout(retry.remaining()?, valkey.transaction()))
             .await
             .map_err(|_elapsed| BackendError::Unavailable("Valkey operation deadline exceeded".into()))??;
         if !transaction.is_current() {
-            drop(transaction);
+            transaction.discard();
             retry.pause().await?;
             continue;
         }
-        let outcome = ensure_accounting_config_attempt(transaction.inner(), marker, expected, state_index).await;
+        let outcome =
+            ensure_accounting_config_attempt(valkey, transaction.inner(), marker, expected, state_index).await;
         match outcome {
             Ok(outcome) => {
                 let remaining = match retry.remaining() {
                     Ok(remaining) => remaining,
                     Err(error) => {
                         if outcome.is_some() {
-                            drop(transaction);
+                            transaction.discard();
                             return Ok(());
                         }
                         drop(transaction);
@@ -339,7 +340,7 @@ async fn read_accounting_marker(
     let mut marker_read = redis::pipe();
     marker_read.cmd("GET").arg(&generation);
     marker_read.cmd("GET").arg(marker);
-    let (generation_stored, stored): (Option<String>, Option<String>) = valkey.pipeline(&marker_read).await?;
+    let (generation_stored, stored): (Option<String>, Option<String>) = Box::pin(valkey.pipeline(&marker_read)).await?;
     match generation_stored.as_deref() {
         Some(ACCOUNTING_GENERATION_VALUE) => Ok(stored),
         Some(_) => Err(BackendError::ConfigurationMismatch),
@@ -372,14 +373,14 @@ async fn ensure_accounting_generation(valkey: &ValkeyConnection, namespace: &str
     let generation = accounting_generation_key(namespace);
     let mut read = redis::pipe();
     read.cmd("GET").arg(&generation);
-    let (stored,): (Option<String>,) = valkey.pipeline(&read).await?;
+    let (stored,): (Option<String>,) = Box::pin(valkey.pipeline(&read)).await?;
     if let Some(stored) = stored {
         return (stored == ACCOUNTING_GENERATION_VALUE)
             .then_some(())
             .ok_or(BackendError::ConfigurationMismatch);
     }
 
-    let scan = scan_namespace_state(valkey, namespace).await?;
+    let scan = Box::pin(scan_namespace_state(valkey, namespace)).await?;
     let value = if scan.unmarked_state {
         LEGACY_STATE_GENERATION_VALUE
     } else {
@@ -389,7 +390,7 @@ async fn ensure_accounting_generation(valkey: &ValkeyConnection, namespace: &str
     claim.atomic();
     claim.cmd("SET").arg(&generation).arg(value).arg("NX").ignore();
     claim.cmd("GET").arg(&generation);
-    let (stored,): (Option<String>,) = valkey.pipeline(&claim).await?;
+    let (stored,): (Option<String>,) = Box::pin(valkey.pipeline(&claim)).await?;
     match stored.as_deref() {
         Some(value) if value == ACCOUNTING_GENERATION_VALUE => Ok(()),
         Some(_) => Err(BackendError::ConfigurationMismatch),
@@ -431,7 +432,7 @@ async fn scan_namespace_state(valkey: &ValkeyConnection, namespace: &str) -> Res
             .arg(&pattern)
             .arg("COUNT")
             .arg(BOOTSTRAP_SCAN_COUNT);
-        let (reply,): (redis::Value,) = valkey.pipeline(&scan).await?;
+        let (reply,): (redis::Value,) = Box::pin(valkey.pipeline(&scan)).await?;
         let (next, keys): (u64, Vec<Vec<u8>>) =
             redis::from_redis_value(reply).map_err(|_error| BackendError::InvalidResponse)?;
         scanned_keys = scanned_keys.saturating_add(keys.len());
@@ -494,6 +495,7 @@ fn is_accounting_config_key(namespace: &str, key: &[u8]) -> bool {
 /// re-arming quota state. A concurrent legacy writer changing the index aborts
 /// the claim and is retried.
 async fn ensure_accounting_config_attempt(
+    valkey: &ValkeyConnection,
     connection: &mut MultiplexedConnection,
     marker: &str,
     expected: &str,
@@ -506,7 +508,7 @@ async fn ensure_accounting_config_attempt(
     let reply: redis::Value = read
         .query_async(connection)
         .await
-        .map_err(|error| command_error(&error))?;
+        .map_err(|error| valkey.transaction_command_error(&error))?;
     let (stored, state_exists): (Option<String>, i64) =
         redis::from_redis_value(reply).map_err(|_error| BackendError::InvalidResponse)?;
 
@@ -525,7 +527,7 @@ async fn ensure_accounting_config_attempt(
     init.cmd("SET").arg(marker).arg(expected).ignore();
     init.query_async(connection)
         .await
-        .map_err(|error| command_error(&error))
+        .map_err(|error| valkey.transaction_command_error(&error))
 }
 
 /// Validate the marker value returned by Valkey after the initialize-or-read
@@ -546,7 +548,7 @@ mod sliding_window;
 mod token_bucket;
 mod window;
 
-use connection::{AbortRetry, command_error, unwatch};
+use connection::{AbortRetry, unwatch};
 pub(super) use connection::{VALKEY_TIMEOUT, ValkeyConnection};
 pub(super) use sliding_window::{ValkeySlidingWindowBackend, ValkeySlidingWindowConfig};
 pub(super) use token_bucket::{ValkeyTokenBucketBackend, ValkeyTokenBucketConfig};

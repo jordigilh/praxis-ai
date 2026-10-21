@@ -309,13 +309,9 @@ if [[ -n "$env_file" ]]; then
     chmod 600 "$env_file"
     env_file_written=1
     {
-        printf 'TOKEN_RATE_LIMIT_SENTINEL_PRODUCT=%q\n' "$product"
-        printf 'TOKEN_RATE_LIMIT_SENTINEL_IMAGE=%q\n' "$image"
-        printf 'TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS=%q\n' \
-            "redis://127.0.0.1:${sentinel_1_port},redis://127.0.0.1:${sentinel_2_port},redis://127.0.0.1:${sentinel_3_port}"
-        printf 'TOKEN_RATE_LIMIT_SENTINEL_SERVICE=mymaster\n'
-        printf 'TOKEN_RATE_LIMIT_SENTINEL_DATA_PASSWORD=%q\n' "$data_password"
-        printf 'TOKEN_RATE_LIMIT_SENTINEL_PASSWORD=%q\n' "$sentinel_password"
+        for name in $(compgen -e | grep '^TOKEN_RATE_LIMIT_SENTINEL_'); do
+            printf '%s=%q\n' "$name" "${!name}"
+        done
     } >"$env_file"
 fi
 
@@ -325,4 +321,7 @@ if (($#)); then
     exit "$rc"
 fi
 echo "Sentinel topology ready: $product $image"
-wait
+while :; do
+    sleep 3600 &
+    wait $!
+done

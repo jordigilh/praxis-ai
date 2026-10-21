@@ -67,8 +67,9 @@ rmcp = { version = "3.4.0", default-features = false, features = ["client", "tra
 # aws-lc-rs into every test binary, and `prefer-post-quantum` implies
 # `aws_lc_rs`. The provider is whatever the process installed.
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "std", "tls12"] }
-schemars = "1.2.2"
 rustls-pemfile = "2.2.0"
+rustls-pki-types = "1.15.1"
+schemars = "1.2.2"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json_canonicalizer = "0.3.2"

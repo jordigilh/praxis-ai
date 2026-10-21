@@ -209,6 +209,8 @@ struct ConfigStruct {
     doc: String,
     /// Fields in declaration order.
     fields: Vec<RawField>,
+    /// Name of the raw deserialization struct for `serde(try_from = "...")`.
+    try_from: Option<String>,
 }
 
 /// Parsed items accumulated from source files belonging to one filter module.
@@ -800,6 +802,7 @@ fn parse_struct(s: &syn::ItemStruct, out: &mut ModuleItems) {
             name: s.ident.to_string(),
             doc: docs.clone(),
             fields,
+            try_from: s.attrs.iter().find_map(|attr| serde_lit_value(attr, "try_from")),
         };
         if is_nested_config_struct(s) {
             out.structs.insert(config.name.clone(), config.clone());
@@ -810,6 +813,7 @@ fn parse_struct(s: &syn::ItemStruct, out: &mut ModuleItems) {
                         name: "ClusterTls".to_owned(),
                         doc: config.doc.clone(),
                         fields: config.fields.clone(),
+                        try_from: config.try_from.clone(),
                     },
                 );
             }
@@ -869,6 +873,11 @@ fn collect_yaml_examples(items: &ModuleItems) -> Vec<String> {
 
 /// Build rendered field metadata for one config struct.
 fn build_fields(config: &ConfigStruct, items: &ModuleItems) -> Vec<FieldInfo> {
+    let config = config
+        .try_from
+        .as_ref()
+        .and_then(|name| items.structs.get(name))
+        .unwrap_or(config);
     let mut fields = Vec::new();
     let mut stack = Vec::new();
     append_rendered_fields("", &config.fields, items, &mut stack, &mut fields);
@@ -921,6 +930,11 @@ fn append_nested_fields(
     }
 
     if let Some(config) = items.structs.get(&type_name) {
+        let config = config
+            .try_from
+            .as_ref()
+            .and_then(|name| items.structs.get(name))
+            .unwrap_or(config);
         stack.push(type_name);
         append_rendered_fields(prefix, &config.fields, items, stack, out);
         stack.pop();

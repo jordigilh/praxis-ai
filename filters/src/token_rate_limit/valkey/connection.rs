@@ -5,7 +5,7 @@
 //! multiplexed connection for pipelines, and a small pool of dedicated
 //! connections for `WATCH` transactions, which are per-connection state.
 
-#![allow(
+#![expect(
     clippy::large_futures,
     reason = "bounded Valkey connection futures compose the transport state machine and deadline guards"
 )]
@@ -119,6 +119,8 @@ pub(in crate::token_rate_limit) struct ValkeyConnection {
     transactions: Arc<TransactionConnections>,
     /// Generation of the cached shared connection.
     generation: Arc<AtomicU64>,
+    /// Generation of the discovered Sentinel topology.
+    topology_generation: Arc<AtomicU64>,
     /// Synchronizes generation advancement with cache publication and checkout.
     generation_lock: Arc<RwLock<()>>,
     /// Cached Sentinel-discovered primary client, invalidated with topology generation.
@@ -217,6 +219,7 @@ impl ValkeyConnection {
             connection: Arc::new(Mutex::new(None)),
             transactions: Arc::new(TransactionConnections::default()),
             generation: Arc::new(AtomicU64::new(0)),
+            topology_generation: Arc::new(AtomicU64::new(0)),
             generation_lock: Arc::new(RwLock::new(())),
             sentinel_primary: Arc::new(tokio::sync::Mutex::new(PrimaryCache::new())),
             timeouts,
@@ -403,6 +406,7 @@ impl ValkeyConnection {
             connection: Arc::new(Mutex::new(None)),
             transactions: Arc::new(TransactionConnections::default()),
             generation: Arc::new(AtomicU64::new(0)),
+            topology_generation: Arc::new(AtomicU64::new(0)),
             generation_lock: Arc::new(RwLock::new(())),
             sentinel_primary: Arc::new(tokio::sync::Mutex::new(PrimaryCache::new())),
             timeouts,
@@ -453,16 +457,47 @@ impl ValkeyConnection {
         match pipe.query_async::<T>(&mut connection).await {
             Ok(value) => Ok(value),
             Err(error) => {
-                self.invalidate(generation).await;
+                self.invalidate(generation, advances_topology_generation(&error)).await;
                 Err(command_error(&error))
             },
         }
     }
 
-    /// Invalidate every cached socket after a connection-level failure. The
-    /// next operation performs fresh native discovery; no failed mutation is
-    /// replayed here.
-    async fn invalidate(&self, generation: u64) {
+    /// Map a command error from a dedicated transaction while preserving
+    /// topology-changing replies for the next Sentinel checkout.
+    pub(super) fn transaction_command_error(&self, error: &redis::RedisError) -> BackendError {
+        if advances_topology_generation(error) {
+            self.topology_generation.fetch_add(1, Ordering::AcqRel);
+            self.fence_shared_connection();
+        }
+        command_error(error)
+    }
+
+    /// Fence shared and pooled sockets after a topology-changing transaction
+    /// failure. The next shared operation must not reuse the old primary.
+    fn fence_shared_connection(&self) {
+        let _generation_guard = self
+            .generation_lock
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut cached = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *cached = None;
+        drop(cached);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.transactions.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Invalidate the shared connection after a failed command. Ordinary
+    /// server replies clear the data socket but retain the discovered primary;
+    /// only connection-level or topology-changing failures force discovery in
+    /// the next topology generation. No failed mutation is replayed here.
+    async fn invalidate(&self, generation: u64, advance_topology: bool) {
+        if advance_topology {
+            self.topology_generation.fetch_add(1, Ordering::AcqRel);
+        }
         let should_invalidate = {
             let _generation_guard = self
                 .generation_lock
@@ -636,14 +671,6 @@ impl ValkeyConnection {
     /// Open a connection without exceeding an already-started lifecycle
     /// deadline. Shared-cache lock wait and native discovery use this same
     /// deadline, so coalescing cannot double the configured bound.
-    #[expect(
-        clippy::allow_attributes,
-        reason = "this stack-frame allowance must work across supported Clippy versions"
-    )]
-    #[allow(
-        clippy::large_stack_frames,
-        reason = "bounded connection/discovery state machine owns its timeout state"
-    )]
     async fn open_until(&self, deadline: Instant) -> Result<MultiplexedConnection, BackendError> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -686,7 +713,7 @@ impl ValkeyConnection {
     ) -> Result<MultiplexedConnection, BackendError> {
         let mut failover_pending = false;
         loop {
-            let generation = self.generation.load(Ordering::Acquire);
+            let generation = self.topology_generation.load(Ordering::Acquire);
             let action = {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 let cache = match tokio::time::timeout(remaining, Arc::clone(&self.sentinel_primary).lock_owned()).await
@@ -702,7 +729,7 @@ impl ValkeyConnection {
             match action {
                 PrimaryAction::Hit(client) => match self.open_primary_until(&client, deadline, connection_config).await
                 {
-                    Ok(connection) if self.generation.load(Ordering::Acquire) == generation => {
+                    Ok(connection) if self.topology_generation.load(Ordering::Acquire) == generation => {
                         if failover_pending {
                             record_sentinel_failover(self.backend_name, "recovered");
                         }
@@ -747,7 +774,7 @@ impl ValkeyConnection {
                         continue;
                     }
                     match self.open_primary_until(&client, deadline, connection_config).await {
-                        Ok(connection) if self.generation.load(Ordering::Acquire) == generation => {
+                        Ok(connection) if self.topology_generation.load(Ordering::Acquire) == generation => {
                             record_sentinel_discovery(self.backend_name, phase, "success");
                             if failover_pending {
                                 record_sentinel_failover(self.backend_name, "recovered");
@@ -756,7 +783,7 @@ impl ValkeyConnection {
                         },
                         Ok(_) | Err(_) => {
                             failover_pending = true;
-                            let result = if self.generation.load(Ordering::Acquire) == generation {
+                            let result = if self.topology_generation.load(Ordering::Acquire) == generation {
                                 "failure"
                             } else {
                                 "stale"
@@ -851,7 +878,7 @@ impl ValkeyConnection {
 
     /// Invalidate a discovered primary without extending the enclosing
     /// connection deadline while waiting for the cache mutex.
-    async fn invalidate_primary_until(&self, generation: u64, deadline: Instant) -> Result<(), BackendError> {
+    async fn invalidate_primary_until(&self, topology_generation: u64, deadline: Instant) -> Result<(), BackendError> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(BackendError::Unavailable("Sentinel primary cache lock timeout".into()));
@@ -859,7 +886,7 @@ impl ValkeyConnection {
         let mut cache = tokio::time::timeout(remaining, self.sentinel_primary.lock())
             .await
             .map_err(|_elapsed| BackendError::Unavailable("Sentinel primary cache lock timeout".into()))?;
-        cache.invalidate(generation);
+        cache.invalidate(topology_generation);
         drop(cache);
         Ok(())
     }
@@ -884,7 +911,7 @@ impl ValkeyConnection {
     ) -> Result<MultiplexedConnection, BackendError> {
         let mut failover_pending = false;
         loop {
-            let generation = self.generation.load(Ordering::Acquire);
+            let generation = self.topology_generation.load(Ordering::Acquire);
             let action = {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 let cache = match tokio::time::timeout(remaining, Arc::clone(&self.sentinel_primary).lock_owned()).await
@@ -900,7 +927,7 @@ impl ValkeyConnection {
             match action {
                 PrimaryAction::Hit(client) => match self.open_primary_until(&client, deadline, connection_config).await
                 {
-                    Ok(connection) if self.generation.load(Ordering::Acquire) == generation => {
+                    Ok(connection) if self.topology_generation.load(Ordering::Acquire) == generation => {
                         if failover_pending {
                             record_sentinel_failover(self.backend_name, "recovered");
                         }
@@ -931,14 +958,16 @@ impl ValkeyConnection {
                         Err(error) => {
                             record_sentinel_discovery(self.backend_name, phase, "failure");
                             drop(lease);
-                            if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                            let remaining = deadline.saturating_duration_since(Instant::now());
+                            if remaining.is_zero() {
                                 record_failed_sentinel_failover(self.backend_name, &mut failover_pending);
                                 return Err(error);
                             }
+                            tokio::time::sleep(SENTINEL_RETRY_INTERVAL.min(remaining)).await;
                             continue;
                         },
                     };
-                    if self.generation.load(Ordering::Acquire) != generation
+                    if self.topology_generation.load(Ordering::Acquire) != generation
                         || lease.publish(client) != PublishResult::Accepted
                     {
                         record_sentinel_discovery(self.backend_name, phase, "stale");
@@ -960,14 +989,6 @@ impl ValkeyConnection {
     }
 
     /// Discover and verify a TLS primary through the configured Sentinels.
-    #[expect(
-        clippy::allow_attributes,
-        reason = "this stack-frame allowance must work across supported Clippy versions"
-    )]
-    #[allow(
-        clippy::large_stack_frames,
-        reason = "bounded TLS discovery owns endpoint traversal and role verification"
-    )]
     #[expect(
         clippy::too_many_lines,
         reason = "bounded TLS discovery owns endpoint traversal, role verification, and retry timing"
@@ -1064,6 +1085,16 @@ impl ValkeyConnection {
             tokio::time::sleep(SENTINEL_RETRY_INTERVAL.min(remaining)).await;
         }
     }
+}
+
+/// Whether a failed shared command can indicate that the discovered primary
+/// is no longer usable. Ordinary server replies are handled by replacing the
+/// data connection while retaining the cached topology.
+fn advances_topology_generation(error: &redis::RedisError) -> bool {
+    error.is_io_error()
+        || error.is_connection_dropped()
+        || error.is_timeout()
+        || matches!(error.code(), Some("READONLY" | "MASTERDOWN"))
 }
 
 /// Classify discovery relative to the initial topology generation.
@@ -1214,7 +1245,7 @@ pub(super) struct TransactionConnection {
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
     /// Generation observed at checkout.
     generation: u64,
-    /// Shared cache generation, fenced on transaction failure.
+    /// Shared data-connection generation, fenced on shared connection failure.
     shared_generation: Arc<AtomicU64>,
     /// Shared generation observed when this transaction was checked out.
     shared_generation_at_checkout: u64,
@@ -1223,8 +1254,8 @@ pub(super) struct TransactionConnection {
 }
 
 /// Whether a checked-out transaction still belongs to both current pool
-/// generations. Either generation changing makes a completed mutation
-/// unconfirmed and prevents the socket from being pooled.
+/// generations before its first command. A later generation change only
+/// prevents socket reuse; a received command result remains confirmed.
 fn transaction_generation_is_current(
     transaction_generation: u64,
     pool_generation: u64,
@@ -1277,6 +1308,13 @@ impl TransactionConnection {
         drop(self.permit.take());
         drop(self);
     }
+
+    /// Close a known-stale or otherwise cleanly abandoned socket without
+    /// advancing the pool generation for unrelated checked-out connections.
+    pub(super) fn discard(mut self) {
+        self.connection.take();
+        drop(self.permit.take());
+    }
 }
 
 impl Drop for TransactionConnection {
@@ -1287,8 +1325,6 @@ impl Drop for TransactionConnection {
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.pool.generation.fetch_add(1, Ordering::AcqRel);
-            self.shared_generation
-                .fetch_max(self.shared_generation_at_checkout.saturating_add(1), Ordering::AcqRel);
         }
     }
 }
@@ -1414,6 +1450,7 @@ mod tests {
     )]
     fn tls_test_material() -> (redis::TlsCertificates, Arc<rustls::ServerConfig>) {
         use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, SanType};
+        use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
 
         praxis_tls::provider::install();
         let ca_key = KeyPair::generate().expect("generate test CA key");
@@ -1432,12 +1469,10 @@ mod tests {
             .expect("sign test server certificate");
         let cert_pem = server_cert.pem();
         let key_pem = server_key.serialize_pem();
-        let server_certs = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+        let server_certs = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
             .collect::<Result<Vec<_>, _>>()
             .expect("parse test server certificate");
-        let server_key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
-            .expect("parse test server key")
-            .expect("test server key is present");
+        let server_key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).expect("parse test server key");
         let server_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(server_certs, server_key)
@@ -1693,9 +1728,48 @@ mod tests {
             "valkey",
         )
         .unwrap();
-        connection.invalidate(7).await;
+        connection.invalidate(7, false).await;
         assert_eq!(connection.generation.load(Ordering::Acquire), 0);
         assert_eq!(connection.transactions.generation.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn topology_generation_is_independent_from_shared_connection_generation() {
+        let connection = ValkeyConnection::standalone_with_timeouts_and_name(
+            "redis://127.0.0.1:1".into(),
+            ValkeyTimeouts::default(),
+            "valkey",
+        )
+        .unwrap();
+        connection.invalidate(0, true).await;
+        assert_eq!(connection.generation.load(Ordering::Acquire), 0);
+        assert_eq!(connection.topology_generation.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn only_connection_and_topology_errors_advance_discovery_generation() {
+        let ordinary = redis::RedisError::from((redis::ServerErrorKind::ResponseError.into(), "WRONGTYPE"));
+        let readonly = redis::RedisError::from((redis::ServerErrorKind::ReadOnly.into(), "READONLY"));
+        let dropped = redis::RedisError::from(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        assert!(!super::advances_topology_generation(&ordinary));
+        assert!(super::advances_topology_generation(&readonly));
+        assert!(super::advances_topology_generation(&dropped));
+    }
+
+    #[test]
+    fn topology_transaction_errors_fence_shared_connections() {
+        let connection = ValkeyConnection::standalone_with_timeouts_and_name(
+            "redis://127.0.0.1:1".into(),
+            ValkeyTimeouts::default(),
+            "valkey",
+        )
+        .unwrap();
+        let readonly = redis::RedisError::from((redis::ServerErrorKind::ReadOnly.into(), "READONLY"));
+        let error = connection.transaction_command_error(&readonly);
+        assert!(matches!(error, BackendError::Unconfirmed(_)));
+        assert_eq!(connection.generation.load(Ordering::Acquire), 1);
+        assert_eq!(connection.topology_generation.load(Ordering::Acquire), 1);
+        assert!(connection.connection.lock().unwrap().is_none());
     }
 
     #[tokio::test]
