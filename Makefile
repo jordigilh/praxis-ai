@@ -18,6 +18,12 @@ SENTINEL_TEST_FILTER ?= sentinel_
 OPENAI_CONFORMANCE_ARGS ?=
 RESPONSES_CONFORMANCE_ARGS ?=
 V                ?=
+# CI uses this stable pin for Clippy and refreshes floating nightly for rustfmt.
+LINT_RUST_VERSION := $(shell sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+# Cargo also finds rustc/clippy/rustfmt through PATH; select their bin directory
+# so a Homebrew installation cannot override the selected toolchain's children.
+LINT_CARGO = PATH="$$(dirname "$$(rustup which --toolchain $(LINT_RUST_VERSION) cargo)"):$${PATH}" rustup run $(LINT_RUST_VERSION) cargo
+LINT_FMT_CARGO = PATH="$$(dirname "$$(rustup which --toolchain nightly cargo)"):$${PATH}" rustup run nightly cargo
 
 # Experimental filter features are package-specific and off by default.
 # Basic Auth is exposed by praxis-ai-proxy and forwarded by the integration-test
@@ -58,6 +64,7 @@ endif
 	openai-conformance check-openai-conformance-reference test-openai-conformance \
 	test-responses-conformance \
 	lint lint-clippy lint-xtask lint-lean check-dep-budget fmt doc audit coverage-check \
+	setup-lint-toolchains \
 	require-container-engine \
 	container container-run \
 	setup-hooks help \
@@ -318,15 +325,22 @@ lint: lint-clippy lint-xtask
 # Clippy across every feature permutation, plus the dependency budget, the
 # rustfmt check, and the unused-dependency scan. These are the rustc/clippy
 # steps; `cargo machete` is here because CI installs it only in this job.
-lint-clippy:
-	cargo clippy --workspace --all-targets -- -D warnings
-	cargo clippy --workspace --all-targets \
+lint-clippy: setup-lint-toolchains
+	$(LINT_CARGO) clippy --workspace --all-targets -- -D warnings
+	$(LINT_CARGO) clippy --workspace --all-targets \
 		--features $(STORE_ALL_WORKSPACE_FEATURES),xtask/openai-all,praxis-ai-proxy/azure-ad-filter,praxis-ai-proxy/basic-auth-filter,praxis-ai-proxy/gcp-adc-filter,praxis-ai-proxy/http-callout-filter,praxis-ai-proxy/token-rate-limit-filter,praxis-ai-proxy/token-ceiling-filter,praxis-ai-proxy/inflight-tracker-filter,praxis-ai-proxy/vertex-anthropic-filter,praxis-tests-integration/azure-ad-filter,praxis-tests-integration/basic-auth-filter,praxis-tests-integration/gcp-adc-filter,praxis-tests-integration/http-callout-filter,praxis-tests-integration/token-rate-limit-filter,praxis-tests-integration/token-ceiling-filter,praxis-tests-integration/inflight-tracker-filter,praxis-tests-integration/vertex-anthropic-filter \
 		-- -D warnings
 	$(MAKE) lint-lean
 	$(MAKE) check-dep-budget
-	cargo +nightly fmt --all -- --check
-	cargo machete --with-metadata .
+	$(LINT_FMT_CARGO) fmt --all -- --check
+	$(LINT_CARGO) machete --with-metadata .
+
+# Match setup-rust-lint in CI: an old local nightly must not silently pass.
+# Refresh failures are fatal, rather than falling back to cached toolchains.
+setup-lint-toolchains:
+	@test -n "$(LINT_RUST_VERSION)" || { echo "ERROR: missing channel in rust-toolchain.toml" >&2; exit 1; }
+	rustup toolchain install $(LINT_RUST_VERSION) --profile minimal --component clippy --no-self-update
+	rustup toolchain install nightly --profile minimal --component rustfmt --no-self-update
 
 # xtask-driven meta lints (dep semver, separators, filter/example docs, markdown
 # links, README/registry/coverage sync checks) plus the FIPS dependency guard.
@@ -365,24 +379,24 @@ lint-license-headers:
 # Lint the product crates with only the default-on gates. `-p` without
 # `--workspace` keeps test-crate features from unifying in and hiding leaks.
 lint-lean:
-	cargo clippy -p praxis-ai-apis -p praxis-ai-filters -p praxis-ai-proxy --all-targets \
+	$(LINT_CARGO) clippy -p praxis-ai-apis -p praxis-ai-filters -p praxis-ai-proxy --all-targets \
 		--no-default-features --features praxis-ai-proxy/standard -- -D warnings
-	RUSTDOCFLAGS="-D warnings" cargo doc -p praxis-ai-apis -p praxis-ai-filters -p praxis-ai-proxy \
+	RUSTDOCFLAGS="-D warnings" $(LINT_CARGO) doc -p praxis-ai-apis -p praxis-ai-filters -p praxis-ai-proxy \
 		--no-deps --document-private-items --no-default-features --features praxis-ai-proxy/standard
 
 # Fail if a heavy crate enters the explicit lean proxy graph, or if that graph
 # grows past LEAN_GRAPH_BUDGET crates.
 check-dep-budget:
-	@tree="$$(cargo tree --locked -p praxis-ai-proxy -e normal,build --target all \
+	@tree="$$($(LINT_CARGO) tree --locked -p praxis-ai-proxy -e normal,build --target all \
 		--no-default-features --features standard --prefix none --format '{p}')" || { echo "ERROR: cargo tree failed"; exit 1; }; \
-	host="$$(cargo tree --locked -p praxis-ai-proxy -e normal,build \
+	host="$$($(LINT_CARGO) tree --locked -p praxis-ai-proxy -e normal,build \
 		--no-default-features --features standard --prefix none --format '{p}')" || { echo "ERROR: cargo tree failed"; exit 1; }; \
 	graph="$$(printf '%s\n' "$$tree" | awk '{print $$1"@"$$2}' | sort -u)"; \
 	status=0; \
 	for crate in $(LEAN_GRAPH_DENY); do \
 		if printf '%s\n' "$$graph" | grep -q "^$$crate@"; then \
 			echo "ERROR: $$crate is in the lean praxis-ai-proxy graph:"; \
-			cargo tree --locked -p praxis-ai-proxy -e normal,build --target all \
+			$(LINT_CARGO) tree --locked -p praxis-ai-proxy -e normal,build --target all \
 				--no-default-features --features standard -i "$$crate" | head -n 15; \
 			status=1; \
 		fi; \
@@ -393,8 +407,8 @@ check-dep-budget:
 	[ "$$count" -le $(LEAN_GRAPH_BUDGET) ] || { echo "ERROR: over budget"; status=1; }; \
 	exit $$status
 
-fmt:
-	cargo +nightly fmt --all
+fmt: setup-lint-toolchains
+	$(LINT_FMT_CARGO) fmt --all
 
 doc:
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
@@ -903,7 +917,8 @@ help:
 	@echo ""
 	@echo "Quality:"
 	@echo "  lint                 clippy + rustfmt + dependency, docs, and example checks"
-	@echo "  lint-clippy          clippy (all feature sets) + rustfmt + dep budget + machete"
+		@echo "  lint-clippy          clippy (all feature sets) + rustfmt + dep budget + machete"
+		@echo "  setup-lint-toolchains refresh stable Clippy and nightly rustfmt to match CI"
 	@echo "  lint-xtask           xtask meta lints (docs, registries, coverage) + FIPS dep guard"
 	@echo "  lint-license-headers reject incorrect MIT SPDX headers in Rust sources"
 	@echo "  fmt                  format with nightly rustfmt"
