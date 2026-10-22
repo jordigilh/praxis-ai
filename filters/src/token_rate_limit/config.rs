@@ -1445,11 +1445,27 @@ mod tests {
             for secret in secrets {
                 assert!(
                     !rendered.contains(secret),
-                    "Debug exposed a controlled secret: {secret}"
+                    "Debug output must not contain credential values"
                 );
             }
             assert!(rendered.contains("<redacted>"), "Debug must identify masked values");
         }
+    }
+
+    #[test]
+    fn debug_redaction_failure_does_not_echo_credentials() {
+        let marker = "intentionally-sensitive-negative-marker";
+        let failure = std::panic::catch_unwind(|| assert_debug_redacts(&marker, &[marker]))
+            .expect_err("an unredacted value must fail the assertion");
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failure.downcast_ref::<&str>().copied())
+            .expect("the assertion must panic with a text diagnostic");
+        assert!(
+            !message.contains(marker),
+            "the failure diagnostic must not echo credential values"
+        );
     }
 
     fn backend_config_yaml(backend: &str) -> String {
@@ -1493,11 +1509,17 @@ sentinel:
         assert_debug_redacts(sentinel, &secrets);
         assert_debug_redacts(topology, &secrets);
         assert_debug_redacts(&backend, &secrets);
-        assert_eq!(sentinel.sentinel_password.as_deref(), Some("sentinel-secret"));
-        assert_eq!(sentinel.redis_password.as_deref(), Some("data-secret"));
-        assert_eq!(
-            sentinel.endpoints,
-            ["redis://inline-user:inline-secret@sentinel.invalid:26379"]
+        assert!(
+            sentinel.sentinel_password.as_deref() == Some("sentinel-secret"),
+            "formatting must leave the Sentinel credential unchanged"
+        );
+        assert!(
+            sentinel.redis_password.as_deref() == Some("data-secret"),
+            "formatting must leave the data credential unchanged"
+        );
+        assert!(
+            sentinel.endpoints == ["redis://inline-user:inline-secret@sentinel.invalid:26379"],
+            "formatting must leave endpoint values unchanged"
         );
         let parsed_debug = format!("{sentinel:?}");
         for visible in ["visible-primary", "sentinel-acl", "data-acl", "2s"] {
@@ -1524,7 +1546,10 @@ sentinel:
         let BackendTopology::Standalone(url) = topology else {
             panic!("fixture must select standalone")
         };
-        assert_eq!(url, "rediss://standalone-user:standalone-secret@primary.invalid:6379");
+        assert!(
+            url == "rediss://standalone-user:standalone-secret@primary.invalid:6379",
+            "formatting must leave the standalone URL unchanged"
+        );
         let config = parse(&backend_config_yaml(yaml)).unwrap();
         assert_debug_redacts(&config, &secrets);
     }
