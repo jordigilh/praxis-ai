@@ -51,7 +51,7 @@ Supports two modes:
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `candidates` | CandidateConfig[] | no | Static list of route candidates (mutually exclusive with `overlay_file`). |
+| `candidates` | object[] | no | Static list of route candidates (mutually exclusive with `overlay_file`). |
 | `candidates[].cluster` | string | yes | Cluster name to select when this candidate is chosen. |
 | `candidates[].credential` | object | no | Optional final-hop credential reference. |
 | `candidates[].credential.strategy` | string | yes | Injection strategy. |

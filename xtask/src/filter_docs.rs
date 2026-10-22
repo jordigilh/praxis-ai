@@ -898,10 +898,10 @@ fn append_rendered_fields(
             let rendered_type = render_field_type(field, &items.enums);
             // Known nested structs are YAML objects, not their internal Rust
             // deserialization type names (for example RawSentinelConfig).
-            let type_str = if items.structs.contains_key(&rendered_type) {
-                "object".to_owned()
-            } else {
-                rendered_type
+            let type_str = match rendered_type.strip_suffix("[]") {
+                Some(inner) if items.structs.contains_key(inner) => "object[]".to_owned(),
+                _ if items.structs.contains_key(&rendered_type) => "object".to_owned(),
+                _ => rendered_type,
             };
             out.push(FieldInfo {
                 name: path.clone(),
@@ -2366,6 +2366,12 @@ mod tests {
                 headers: HeaderConfig,
                 /// Cluster entries.
                 clusters: Vec<ClusterConfig>,
+                optional_headers: Option<HeaderConfig>,
+                optional_clusters: Option<Vec<ClusterConfig>>,
+                optional_entries: Vec<Option<ClusterConfig>>,
+                labels: Vec<String>,
+                optional_labels: Option<Vec<String>>,
+                modes: Vec<Mode>,
             }
 
             #[derive(Debug, Deserialize)]
@@ -2381,6 +2387,10 @@ mod tests {
                 /// Cluster name.
                 name: String,
             }
+
+            #[derive(Debug, Deserialize)]
+            #[serde(rename_all = \"snake_case\")]
+            enum Mode { First, Second }
         ";
         let file: syn::File = syn::parse_str(source).unwrap();
         let mut items = ModuleItems::new();
@@ -2390,16 +2400,19 @@ mod tests {
         let names: Vec<&str> = filter.fields.iter().map(|field| field.name.as_str()).collect();
         assert!(names.contains(&"headers.method"), "nested object field should render");
         assert!(names.contains(&"clusters[].name"), "nested list field should render");
-        assert_eq!(
-            filter
-                .fields
-                .iter()
-                .find(|field| field.name == "headers")
-                .unwrap()
-                .type_str,
-            "object",
-            "known config structs must render as YAML objects rather than internal Rust names"
-        );
+        for (name, expected) in [
+            ("headers", "object"),
+            ("clusters", "object[]"),
+            ("optional_headers", "object"),
+            ("optional_clusters", "object[]"),
+            ("optional_entries", "object[]"),
+            ("labels", "string[]"),
+            ("optional_labels", "string[]"),
+            ("modes", "(`first` \\| `second`)[]"),
+        ] {
+            let field = filter.fields.iter().find(|field| field.name == name).unwrap();
+            assert_eq!(field.type_str, expected, "{name} must describe its YAML shape");
+        }
     }
 
     #[test]

@@ -42,12 +42,12 @@ Supports two protocol profiles: `current` (session-based, default) and `stateles
 | `invalid_tool_policy` | `reject_server` \| `filter_out` | no | Behavior when a tool has an invalid schema. |
 | `path` | string | no | Public MCP path handled by Praxis. |
 | `protocol_profile` | `current` \| `stateless` | no | Protocol profile governing session semantics and header requirements for this broker instance. |
-| `servers` | McpServerConfig[] | no | Backend server definitions. |
+| `servers` | object[] | no | Backend server definitions. |
 | `servers[].name` | string | yes | Unique server name. |
 | `servers[].cluster` | string | yes | Backend cluster name. |
 | `servers[].path` | string | no | Backend MCP path. |
 | `servers[].tool_prefix` | string | no | Tool prefix for this server. |
-| `servers[].tools` | ToolConfig[] | no | Statically defined tools. |
+| `servers[].tools` | object[] | no | Statically defined tools. |
 | `servers[].tools[].name` | string | yes | Tool name on the backend. |
 | `servers[].tools[].description` | string | no | Optional description. |
 | `servers[].tools[].inputSchema` | any | no | Optional input schema. `schema` is accepted as a local shorthand. |

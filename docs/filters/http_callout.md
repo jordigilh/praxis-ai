@@ -19,7 +19,7 @@ Makes an outbound HTTP request during request processing, optionally forwarding 
 | `target.url` | string | yes | Absolute HTTP(S) URL to call. |
 | `target.allow_private_addresses` | bool | no | Allow the target to resolve to a private, loopback, or link-local address. Defaults to `false`. Set to `true` explicitly when a trusted loopback/sidecar or private service is the intended destination. When disabled, the callout is rejected at request time if any resolved peer address is private/loopback/link-local. Cloud metadata, unspecified, and multicast addresses remain blocked when this option is enabled. |
 | `target.timeout` | Duration | no | Request timeout (e.g. `"2s"`, `"500ms"`). |
-| `target.headers` | HeaderEntry[] | no | Static headers to send with every callout. |
+| `target.headers` | object[] | no | Static headers to send with every callout. |
 | `target.headers[].name` | string | yes | Header name. |
 | `target.headers[].value` | string | yes | Header value. Supports `${VAR}` env-var expansion. |
 | `target.forward_headers` | string[] | no | Headers to copy from the downstream request. |
@@ -28,7 +28,7 @@ Makes an outbound HTTP request during request processing, optionally forwarding 
 | `request.phase` | `request_headers` \| `request_body` | no | Phase at which the callout executes. |
 | `request.max_body_bytes` | integer | no | Maximum body bytes to buffer. Caps both the forwarded request body and the accepted callout response body. |
 | `response` | object | no | Response extraction and header injection. |
-| `response.extract` | ExtractionConfig[] | no | `JSONPath` extractions to write into [`FilterResultSet`]. |
+| `response.extract` | object[] | no | `JSONPath` extractions to write into [`FilterResultSet`]. |
 | `response.extract[].json_path` | string | yes | `JSONPath` expression to evaluate against the response body. |
 | `response.extract[].result_key` | string | yes | Key to write the result under in [`FilterResultSet`]. |
 | `response.inject_headers` | string[] | no | Callout response headers to inject into the upstream request on success. |
