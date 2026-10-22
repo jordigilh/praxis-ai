@@ -304,9 +304,8 @@ fn sentinel_fixture_supports_separate_sentinel_and_data_credentials() {
         eprintln!("skipping: independent Sentinel and data passwords are not set");
         return;
     }
-    assert_ne!(
-        env::var("TOKEN_RATE_LIMIT_SENTINEL_PASSWORD").ok(),
-        env::var("TOKEN_RATE_LIMIT_SENTINEL_DATA_PASSWORD").ok(),
+    assert!(
+        env::var("TOKEN_RATE_LIMIT_SENTINEL_PASSWORD").ok() != env::var("TOKEN_RATE_LIMIT_SENTINEL_DATA_PASSWORD").ok(),
         "Sentinel and data credentials must be independent"
     );
     let backend = StatefulCapturingBackend::new(vec![
@@ -344,6 +343,39 @@ fn sentinel_fixture_supports_separate_sentinel_and_data_credentials() {
         backend.requests().len(),
         2,
         "both authenticated admissions invoke upstream"
+    );
+}
+
+#[test]
+fn sentinel_equal_credential_failure_does_not_log_values() {
+    let marker = "controlled-equal-credential-negative-marker";
+    let output = Command::new(env::current_exe().expect("locate integration test binary"))
+        .args([
+            "--exact",
+            "examples::token_rate_limit_sentinel::sentinel_fixture_supports_separate_sentinel_and_data_credentials",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("TOKEN_RATE_LIMIT_SENTINEL_PASSWORD", marker)
+        .env("TOKEN_RATE_LIMIT_SENTINEL_DATA_PASSWORD", marker)
+        .env_remove("TOKEN_RATE_LIMIT_SENTINEL_ENDPOINTS")
+        .output()
+        .expect("run the equal-credential failure path without a topology");
+    assert!(
+        !output.status.success(),
+        "equal credentials must fail before fixture startup"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for diagnostic in [&stdout, &stderr] {
+        assert!(
+            !diagnostic.contains(marker),
+            "integration failure diagnostics must not echo credential values"
+        );
+    }
+    assert!(
+        stderr.contains("Sentinel and data credentials must be independent"),
+        "the child must fail on credential independence, not an unrelated startup error"
     );
 }
 
