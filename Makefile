@@ -340,7 +340,7 @@ lint-clippy: setup-lint-toolchains
 setup-lint-toolchains:
 	@test -n "$(LINT_RUST_VERSION)" || { echo "ERROR: missing channel in rust-toolchain.toml" >&2; exit 1; }
 	rustup toolchain install $(LINT_RUST_VERSION) --profile minimal --component clippy --no-self-update
-	rustup toolchain install nightly --profile minimal --component rustfmt --no-self-update
+	rustup toolchain install nightly --profile minimal --component rustfmt --allow-downgrade --no-self-update
 
 # xtask-driven meta lints (dep semver, separators, filter/example docs, markdown
 # links, README/registry/coverage sync checks) plus the FIPS dependency guard.

@@ -63,6 +63,7 @@ if args[:1] == ["run"] and args[2:4] == ["cargo", "tree"]:
         self.assertIn("clippy", calls[0])
         self.assertEqual(calls[1][:3], ["toolchain", "install", "nightly"])
         self.assertIn("rustfmt", calls[1])
+        self.assertIn("--allow-downgrade", calls[1])
         commands = [call for call in calls if call[0] == "run"]
         for call in commands:
             self.assertEqual(call[:3], ["run", "nightly" if call[3] == "fmt" else "9.8.7", "cargo"])
@@ -84,7 +85,7 @@ if args[:1] == ["run"] and args[2:4] == ["cargo", "tree"]:
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(calls[-1], ["run", "nightly", "cargo", "fmt", "--all"])
         self.assertIn(["toolchain", "install", "nightly", "--profile", "minimal",
-                       "--component", "rustfmt", "--no-self-update"], calls)
+                       "--component", "rustfmt", "--allow-downgrade", "--no-self-update"], calls)
 
     def test_missing_repository_pin_stops_before_installing_any_toolchain(self):
         result, calls = self.run_target("lint-clippy", channel="")
