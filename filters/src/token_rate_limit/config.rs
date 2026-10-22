@@ -1218,7 +1218,10 @@ impl std::fmt::Debug for RawSentinelConfig {
             .field("endpoints", &"<redacted>")
             .field("service_name", &self.service_name)
             .field("sentinel_username", &self.sentinel_username)
-            .field("sentinel_password", &self.sentinel_password.as_ref().map(|_| "<redacted>"))
+            .field(
+                "sentinel_password",
+                &self.sentinel_password.as_ref().map(|_| "<redacted>"),
+            )
             .field("redis_username", &self.redis_username)
             .field("redis_password", &self.redis_password.as_ref().map(|_| "<redacted>"))
             .field("discovery_timeout", &self.discovery_timeout)
