@@ -1081,7 +1081,6 @@ impl Default for BackendConfig {
 }
 
 /// Mutually exclusive backend connection topologies.
-#[derive(Debug)]
 pub(super) enum BackendTopology {
     /// One standalone Redis/Valkey endpoint.
     Standalone(String),
@@ -1089,7 +1088,17 @@ pub(super) enum BackendTopology {
     Sentinel(Box<SentinelConfig>),
 }
 
-#[derive(Debug, Deserialize)]
+impl std::fmt::Debug for BackendTopology {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // URLs can contain userinfo or other credential-bearing values.
+            Self::Standalone(_) => f.debug_tuple("Standalone").field(&"<redacted>").finish(),
+            Self::Sentinel(config) => f.debug_tuple("Sentinel").field(config).finish(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 /// Raw flat backend fields converted into [`BackendConfig`].
 struct RawBackendConfig {
@@ -1160,7 +1169,21 @@ struct RawBackendConfig {
     operation_timeout: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+impl std::fmt::Debug for RawBackendConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawBackendConfig")
+            .field("kind", &self.kind)
+            .field("url", &self.url.as_ref().map(|_| "<redacted>"))
+            .field("sentinel", &self.sentinel)
+            .field("namespace", &self.namespace)
+            .field("on_failure", &self.on_failure)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("operation_timeout", &self.operation_timeout)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 /// Raw Sentinel fields converted into [`SentinelConfig`].
 struct RawSentinelConfig {
@@ -1186,6 +1209,21 @@ struct RawSentinelConfig {
     /// Maximum Sentinel discovery time as a duration string; defaults to 5s.
     #[serde(default)]
     discovery_timeout: Option<String>,
+}
+
+impl std::fmt::Debug for RawSentinelConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawSentinelConfig")
+            // Raw endpoints may contain inline credentials or secret expansion.
+            .field("endpoints", &"<redacted>")
+            .field("service_name", &self.service_name)
+            .field("sentinel_username", &self.sentinel_username)
+            .field("sentinel_password", &self.sentinel_password.as_ref().map(|_| "<redacted>"))
+            .field("redis_username", &self.redis_username)
+            .field("redis_password", &self.redis_password.as_ref().map(|_| "<redacted>"))
+            .field("discovery_timeout", &self.discovery_timeout)
+            .finish()
+    }
 }
 
 #[expect(
@@ -1244,7 +1282,7 @@ impl TryFrom<RawBackendConfig> for BackendConfig {
 }
 
 /// Validated inputs for native redis-rs Sentinel discovery.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SentinelConfig {
     /// Ordered Sentinel endpoints. Three independent endpoints are
@@ -1266,6 +1304,23 @@ pub(super) struct SentinelConfig {
     pub redis_password: Option<String>,
     /// Overall Sentinel discovery and convergence bound.
     pub discovery_timeout: Duration,
+}
+
+impl std::fmt::Debug for SentinelConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SentinelConfig")
+            .field("endpoints", &"<redacted>")
+            .field("service_name", &self.service_name)
+            .field("sentinel_username", &self.sentinel_username)
+            .field(
+                "sentinel_password",
+                &self.sentinel_password.as_ref().map(|_| "<redacted>"),
+            )
+            .field("redis_username", &self.redis_username)
+            .field("redis_password", &self.redis_password.as_ref().map(|_| "<redacted>"))
+            .field("discovery_timeout", &self.discovery_timeout)
+            .finish()
+    }
 }
 
 /// Behavior when a shared-backend reservation cannot be confirmed.
@@ -1380,6 +1435,114 @@ mod tests {
             "{key}\nrules:\n  - name: default\n    algorithm: sliding_window\n    window: 1h\n    capacity: 1000\n    \
              reserved_tokens: 50\n"
         )
+    }
+
+    fn assert_debug_redacts(value: &dyn std::fmt::Debug, secrets: &[&str]) {
+        for rendered in [format!("{value:?}"), format!("{value:#?}")] {
+            for secret in secrets {
+                assert!(
+                    !rendered.contains(secret),
+                    "Debug exposed a controlled secret: {secret}"
+                );
+            }
+            assert!(rendered.contains("<redacted>"), "Debug must identify masked values");
+        }
+    }
+
+    fn backend_config_yaml(backend: &str) -> String {
+        let indented = backend.lines().map(|line| format!("  {line}\n")).collect::<String>();
+        key_yaml(&format!("backend:\n{indented}"))
+    }
+
+    #[test]
+    fn sentinel_config_debug_redacts_credentials_at_each_boundary() {
+        let yaml = "kind: redis
+namespace: visible-namespace
+connect_timeout: 200ms
+operation_timeout: 300ms
+sentinel:
+  endpoints: [redis://inline-user:inline-secret@sentinel.invalid:26379]
+  service_name: visible-primary
+  sentinel_username: sentinel-acl
+  sentinel_password: sentinel-secret
+  redis_username: data-acl
+  redis_password: data-secret
+  discovery_timeout: 2s
+";
+        let secrets = ["inline-user", "inline-secret", "sentinel-secret", "data-secret"];
+        let raw: RawBackendConfig = serde_yaml::from_str(yaml).unwrap();
+        let raw_sentinel = raw.sentinel.as_ref().unwrap();
+        assert_debug_redacts(raw_sentinel, &secrets);
+        assert_debug_redacts(&raw, &secrets);
+        let raw_debug = format!("{raw_sentinel:?}");
+        for visible in ["visible-primary", "sentinel-acl", "data-acl", "2s"] {
+            assert!(
+                raw_debug.contains(visible),
+                "non-secret diagnostics must preserve {visible}"
+            );
+        }
+
+        let backend = BackendConfig::try_from(raw).unwrap();
+        let topology = backend.topology.as_ref().unwrap();
+        let BackendTopology::Sentinel(sentinel) = topology else {
+            panic!("fixture must select Sentinel")
+        };
+        assert_debug_redacts(sentinel, &secrets);
+        assert_debug_redacts(topology, &secrets);
+        assert_debug_redacts(&backend, &secrets);
+        assert_eq!(sentinel.sentinel_password.as_deref(), Some("sentinel-secret"));
+        assert_eq!(sentinel.redis_password.as_deref(), Some("data-secret"));
+        assert_eq!(
+            sentinel.endpoints,
+            ["redis://inline-user:inline-secret@sentinel.invalid:26379"]
+        );
+        let parsed_debug = format!("{sentinel:?}");
+        for visible in ["visible-primary", "sentinel-acl", "data-acl", "2s"] {
+            assert!(
+                parsed_debug.contains(visible),
+                "non-secret diagnostics must preserve {visible}"
+            );
+        }
+        let config = parse(&backend_config_yaml(yaml)).unwrap();
+        assert_debug_redacts(&config, &secrets);
+        assert!(format!("{config:?}").contains("visible-namespace"));
+    }
+
+    #[test]
+    fn standalone_config_debug_redacts_urls_at_each_boundary() {
+        let yaml = "kind: valkey\nurl: rediss://standalone-user:standalone-secret@primary.invalid:6379\n";
+        let secrets = ["standalone-user", "standalone-secret"];
+        let raw: RawBackendConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_debug_redacts(&raw, &secrets);
+        let backend = BackendConfig::try_from(raw).unwrap();
+        assert_debug_redacts(&backend, &secrets);
+        let topology = backend.topology.as_ref().unwrap();
+        assert_debug_redacts(topology, &secrets);
+        let BackendTopology::Standalone(url) = topology else {
+            panic!("fixture must select standalone")
+        };
+        assert_eq!(url, "rediss://standalone-user:standalone-secret@primary.invalid:6379");
+        let config = parse(&backend_config_yaml(yaml)).unwrap();
+        assert_debug_redacts(&config, &secrets);
+    }
+
+    #[test]
+    fn backend_config_debug_preserves_absent_credentials() {
+        let raw: RawBackendConfig = serde_yaml::from_str("kind: memory").unwrap();
+        let rendered = format!("{raw:?}");
+        assert!(rendered.contains("url: None"));
+        assert!(rendered.contains("sentinel: None"));
+        let yaml =
+            "kind: redis\nsentinel:\n  endpoints: [redis://sentinel.invalid:26379]\n  service_name: visible-primary\n";
+        let raw: RawBackendConfig = serde_yaml::from_str(yaml).unwrap();
+        let raw_sentinel = raw.sentinel.as_ref().unwrap();
+        let rendered = format!("{raw_sentinel:?}");
+        assert!(rendered.contains("sentinel_password: None"));
+        assert!(rendered.contains("redis_password: None"));
+        let backend = BackendConfig::try_from(raw).unwrap();
+        let rendered = format!("{backend:?}");
+        assert!(rendered.contains("sentinel_password: None"));
+        assert!(rendered.contains("redis_password: None"));
     }
 
     fn ip_dim(header: Option<&str>) -> KeyDimension {
